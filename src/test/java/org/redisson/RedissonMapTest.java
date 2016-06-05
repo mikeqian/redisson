@@ -1,4 +1,4 @@
-package temp;
+package org.redisson;
 
 import java.io.Serializable;
 import java.util.Map;
@@ -10,6 +10,9 @@ import org.redisson.Redisson;
 
 public class RedissonMapTest extends BaseTest {
 
+    /**
+     * 重写hashcode和equals
+     */
     public static class SimpleKey implements Serializable {
 
         private String key;
@@ -112,6 +115,9 @@ public class RedissonMapTest extends BaseTest {
 
     }
 
+    /**
+     * Map可空值
+     */
     @Test
     public void testNull() {
         Redisson redisson = Redisson.create();
@@ -162,6 +168,9 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
+    /**
+     * hkeys命令
+     */
     @Test
     public void testKeySet() {
         Redisson redisson = Redisson.create();
@@ -176,6 +185,9 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
+    /**
+     * hvals 命令
+     */
     @Test
     public void testContainsValue() {
         Redisson redisson = Redisson.create();
@@ -191,6 +203,9 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
+    /**
+     * hexists
+     */
     @Test
     public void testContainsKey() {
         Redisson redisson = Redisson.create();
@@ -325,6 +340,9 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
+    /**
+     * hlen
+     */
     @Test
     public void testSize() {
         Redisson redisson = Redisson.create();
