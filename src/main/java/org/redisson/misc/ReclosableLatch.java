@@ -69,19 +69,9 @@ public class ReclosableLatch extends AbstractQueuedSynchronizer {
       return getState() == OPEN_STATE;
    }
 
-   // waiting for an open state
    public final void await() throws InterruptedException {
       acquireSharedInterruptibly(1); // the 1 is a dummy value that is not used.
    }
-
-   public final void awaitUninterruptibly() {
-        try {
-            await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
 
    public final boolean await(long time, TimeUnit unit) throws InterruptedException {
       return tryAcquireSharedNanos(1, unit.toNanos(time)); // the 1 is a dummy value that is not used.

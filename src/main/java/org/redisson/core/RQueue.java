@@ -18,16 +18,12 @@ package org.redisson.core;
 import java.util.Queue;
 
 /**
- * {@link java.util.Queue} backed by Redis
+ * Distributed and concurrent implementation of {@link java.util.List}
  *
  * @author Nikita Koksharov
  *
- * @param <V> the type of elements held in this collection
+ * @param <V> value
  */
-public interface RQueue<V> extends Queue<V>, RExpirable, RQueueAsync<V> {
-
-    V pollLastAndOfferFirstTo(String dequeName);
-
-    V pollLastAndOfferFirstTo(RQueue<V> deque);
+public interface RQueue<V> extends Queue<V>, RObject {
 
 }

@@ -15,7 +15,6 @@
  */
 package org.redisson.core;
 
-import java.util.List;
 
 /**
  * Distributed topic. Messages are delivered to all message listeners across Redis cluster.
@@ -24,22 +23,14 @@ import java.util.List;
  *
  * @param <M> the type of message object
  */
-public interface RTopic<M> extends RTopicAsync<M> {
-
-    /**
-     * Get topic channel names
-     *
-     * @return
-     */
-    List<String> getChannelNames();
+public interface RTopic<M> extends RObject {
 
     /**
      * Publish the message to all subscribers of this topic
      *
      * @param message
-     * @return the number of clients that received the message
      */
-    long publish(M message);
+    void publish(M message);
 
     /**
      * Subscribes to this topic.
@@ -51,15 +42,6 @@ public interface RTopic<M> extends RTopicAsync<M> {
      * @see org.redisson.core.MessageListener
      */
     int addListener(MessageListener<M> listener);
-
-    /**
-     * Subscribes to status changes of this topic
-     *
-     * @param listener
-     * @return
-     * @see org.redisson.core.StatusListener
-     */
-    int addListener(StatusListener listener);
 
     /**
      * Removes the listener by <code>id</code> for listening this topic

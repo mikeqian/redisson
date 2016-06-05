@@ -15,19 +15,18 @@
  */
 package org.redisson;
 
-import java.util.Collections;
-import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.redisson.client.RedisPubSubListener;
-import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.command.CommandAsyncExecutor;
-import org.redisson.connection.PubSubConnectionEntry;
+import org.redisson.connection.ConnectionManager;
+import org.redisson.connection.ConnectionManager.PubSubEntry;
 import org.redisson.core.MessageListener;
 import org.redisson.core.RTopic;
-import org.redisson.core.StatusListener;
 
-import io.netty.util.concurrent.Future;
+import com.lambdaworks.redis.RedisConnection;
+import com.lambdaworks.redis.pubsub.RedisPubSubAdapter;
 
 /**
  * Distributed topic implementation. Messages are delivered to all message listeners across Redis cluster.
@@ -36,71 +35,72 @@ import io.netty.util.concurrent.Future;
  *
  * @param <M> message
  */
-public class RedissonTopic<M> implements RTopic<M> {
+public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
 
-    final CommandAsyncExecutor commandExecutor;
-    private final String name;
-    private final Codec codec;
+    private final CountDownLatch subscribeLatch = new CountDownLatch(1);
+    private final AtomicBoolean subscribeOnce = new AtomicBoolean();
 
-    protected RedissonTopic(CommandAsyncExecutor commandExecutor, String name) {
-        this(commandExecutor.getConnectionManager().getCodec(), commandExecutor, name);
+    private final Map<Integer, RedisPubSubTopicListenerWrapper<String, M>> listeners =
+                                new ConcurrentHashMap<Integer, RedisPubSubTopicListenerWrapper<String, M>>();
+    private final ConnectionManager connectionManager;
+
+    private PubSubEntry pubSubEntry;
+
+    RedissonTopic(ConnectionManager connectionManager, String name) {
+        super(name);
+        this.connectionManager = connectionManager;
     }
 
-    protected RedissonTopic(Codec codec, CommandAsyncExecutor commandExecutor, String name) {
-        this.commandExecutor = commandExecutor;
-        this.name = name;
-        this.codec = codec;
-    }
+    public void subscribe() {
+        if (subscribeOnce.compareAndSet(false, true)) {
+            RedisPubSubAdapter<String, M> listener = new RedisPubSubAdapter<String, M>() {
 
-    public List<String> getChannelNames() {
-        return Collections.singletonList(name);
+                @Override
+                public void subscribed(String channel, long count) {
+                    if (channel.equals(getName())) {
+                        subscribeLatch.countDown();
+                    }
+                }
+
+            };
+
+            pubSubEntry = connectionManager.subscribe(listener, getName());
+        }
+
+        try {
+            subscribeLatch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Override
-    public long publish(M message) {
-        return commandExecutor.get(publishAsync(message));
+    public void publish(M message) {
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            conn.publish(getName(), message);
+        } finally {
+            connectionManager.release(conn);
+        }
     }
-
-    @Override
-    public Future<Long> publishAsync(M message) {
-        return commandExecutor.writeAsync(name, codec, RedisCommands.PUBLISH, name, message);
-    }
-
-    @Override
-    public int addListener(StatusListener listener) {
-        return addListener(new PubSubStatusListener(listener, name));
-    };
 
     @Override
     public int addListener(MessageListener<M> listener) {
-        PubSubMessageListener<M> pubSubListener = new PubSubMessageListener<M>(listener, name);
-        return addListener(pubSubListener);
-    }
-
-    private int addListener(RedisPubSubListener<M> pubSubListener) {
-        Future<PubSubConnectionEntry> future = commandExecutor.getConnectionManager().subscribe(codec, name, pubSubListener);
-        future.syncUninterruptibly();
-        return System.identityHashCode(pubSubListener);
+        RedisPubSubTopicListenerWrapper<String, M> pubSubListener = new RedisPubSubTopicListenerWrapper<String, M>(listener, getName());
+        listeners.put(pubSubListener.hashCode(), pubSubListener);
+        pubSubEntry.addListener(pubSubListener);
+        return pubSubListener.hashCode();
     }
 
     @Override
     public void removeListener(int listenerId) {
-        PubSubConnectionEntry entry = commandExecutor.getConnectionManager().getPubSubEntry(name);
-        if (entry == null) {
-            return;
-        }
-        synchronized (entry) {
-            if (entry.isActive()) {
-                entry.removeListener(name, listenerId);
-                if (!entry.hasListeners(name)) {
-                    commandExecutor.getConnectionManager().unsubscribe(name);
-                }
-                return;
-            }
-        }
+        RedisPubSubTopicListenerWrapper<String, M> pubSubListener = listeners.remove(listenerId);
+        pubSubEntry.removeListener(pubSubListener);
+    }
 
-        // listener has been re-attached
-        removeListener(listenerId);
+    @Override
+    public void close() {
+        connectionManager.unsubscribe(pubSubEntry, getName());
     }
 
 }

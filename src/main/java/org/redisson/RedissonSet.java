@@ -15,24 +15,13 @@
  */
 package org.redisson;
 
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
-import java.util.List;
-import java.util.Set;
 
-import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.RedisCommand;
-import org.redisson.client.protocol.RedisCommand.ValueType;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.client.protocol.convertor.BooleanReplayConvertor;
-import org.redisson.client.protocol.decoder.ListScanResult;
-import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RSet;
 
-import io.netty.util.concurrent.Future;
+import com.lambdaworks.redis.RedisConnection;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.Set}
@@ -41,24 +30,23 @@ import io.netty.util.concurrent.Future;
  *
  * @param <V> value
  */
-public class RedissonSet<V> extends RedissonExpirable implements RSet<V> {
+public class RedissonSet<V> extends RedissonObject implements RSet<V> {
 
-    protected RedissonSet(CommandAsyncExecutor commandExecutor, String name) {
-        super(commandExecutor, name);
-    }
+    private final ConnectionManager connectionManager;
 
-    public RedissonSet(Codec codec, CommandAsyncExecutor commandExecutor, String name) {
-        super(codec, commandExecutor, name);
+    RedissonSet(ConnectionManager connectionManager, String name) {
+        super(name);
+        this.connectionManager = connectionManager;
     }
 
     @Override
     public int size() {
-        return get(sizeAsync());
-    }
-
-    @Override
-    public Future<Integer> sizeAsync() {
-        return commandExecutor.readAsync(getName(), codec, RedisCommands.SCARD_INT, getName());
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.scard(getName()).intValue();
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
@@ -68,273 +56,116 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V> {
 
     @Override
     public boolean contains(Object o) {
-        return get(containsAsync(o));
-    }
-
-    @Override
-    public Future<Boolean> containsAsync(Object o) {
-        return commandExecutor.readAsync(getName(o), codec, RedisCommands.SISMEMBER, getName(o), o);
-    }
-
-    protected String getName(Object o) {
-        return getName();
-    }
-
-    ListScanResult<V> scanIterator(String name, InetSocketAddress client, long startPos) {
-        Future<ListScanResult<V>> f = commandExecutor.readAsync(client, name, codec, RedisCommands.SSCAN, name, startPos);
-        return get(f);
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.sismember(getName(), o);
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public Iterator<V> iterator() {
-        return new RedissonBaseIterator<V>() {
-
-            @Override
-            ListScanResult<V> iterator(InetSocketAddress client, long nextIterPos) {
-                return scanIterator(getName(), client, nextIterPos);
-            }
-
-            @Override
-            void remove(V value) {
-                RedissonSet.this.remove(value);
-            }
-            
-        };
-    }
-
-    @Override
-    public Future<Set<V>> readAllAsync() {
-        return commandExecutor.readAsync(getName(), codec, RedisCommands.SMEMBERS, getName());
-    }
-
-    @Override
-    public Set<V> readAll() {
-        return get(readAllAsync());
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            // TODO use SSCAN in case of usage Redis 2.8
+            return (Iterator<V>) connection.smembers(getName()).iterator();
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public Object[] toArray() {
-        Set<Object> res = (Set<Object>) get(readAllAsync());
-        return res.toArray();
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.smembers(getName()).toArray();
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public <T> T[] toArray(T[] a) {
-        Set<Object> res = (Set<Object>) get(readAllAsync());
-        return res.toArray(a);
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.smembers(getName()).toArray(a);
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public boolean add(V e) {
-        return get(addAsync(e));
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.sadd(getName(), e) > 0;
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
-    public Future<Boolean> addAsync(V e) {
-        return commandExecutor.writeAsync(getName(e), codec, RedisCommands.SADD_SINGLE, getName(e), e);
-    }
-
-    @Override
-    public V removeRandom() {
-        return get(removeRandomAsync());
-    }
-
-    @Override
-    public Future<V> removeRandomAsync() {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SPOP_SINGLE, getName());
-    }
-
-    @Override
-    public Future<Boolean> removeAsync(Object o) {
-        return commandExecutor.writeAsync(getName(o), codec, RedisCommands.SREM_SINGLE, getName(o), o);
-    }
-
-    @Override
-    public boolean remove(Object value) {
-        return get(removeAsync((V)value));
-    }
-
-    @Override
-    public Future<Boolean> moveAsync(String destination, V member) {
-        return commandExecutor.writeAsync(getName(member), codec, RedisCommands.SMOVE, getName(member), destination, member);
-    }
-
-    @Override
-    public boolean move(String destination, V member) {
-        return get(moveAsync(destination, member));
+    public boolean remove(Object o) {
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.srem(getName(), o) > 0;
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public boolean containsAll(Collection<?> c) {
-        return get(containsAllAsync(c));
-    }
-
-    @Override
-    public Future<Boolean> containsAllAsync(Collection<?> c) {
-        if (c.isEmpty()) {
-            return newSucceededFuture(true);
+        for (Object object : c) {
+            if (!contains(object)) {
+                return false;
+            }
         }
-        
-        return commandExecutor.evalWriteAsync(getName(), codec, new RedisCommand<Boolean>("EVAL", new BooleanReplayConvertor(), 5, ValueType.OBJECTS),
-                        "redis.call('sadd', KEYS[2], unpack(ARGV)); "
-                        + "local size = redis.call('sdiff', KEYS[2], KEYS[1]);"
-                        + "redis.call('del', KEYS[2]); "
-                        + "return #size == 0 and 1 or 0; ",
-                       Arrays.<Object>asList(getName(), "redisson_temp__{" + getName() + "}"), c.toArray());
+        return true;
     }
 
     @Override
     public boolean addAll(Collection<? extends V> c) {
-        return get(addAllAsync(c));
-    }
-
-    @Override
-    public Future<Boolean> addAllAsync(Collection<? extends V> c) {
-        if (c.isEmpty()) {
-            return newSucceededFuture(false);
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.sadd(getName(), c.toArray()) > 0;
+        } finally {
+            connectionManager.release(connection);
         }
-        
-        List<Object> args = new ArrayList<Object>(c.size() + 1);
-        args.add(getName());
-        args.addAll(c);
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SADD_BOOL, args.toArray());
     }
 
     @Override
     public boolean retainAll(Collection<?> c) {
-        return get(retainAllAsync(c));
-    }
-
-    @Override
-    public Future<Boolean> retainAllAsync(Collection<?> c) {
-        if (c.isEmpty()) {
-            return deleteAsync();
+        boolean changed = false;
+        for (Iterator<V> iterator = iterator(); iterator.hasNext();) {
+            V object = iterator.next();
+            if (!c.contains(object)) {
+                iterator.remove();
+                changed = true;
+            }
         }
-        return commandExecutor.evalWriteAsync(getName(), codec, new RedisCommand<Boolean>("EVAL", new BooleanReplayConvertor(), 5, ValueType.OBJECTS),
-               "redis.call('sadd', KEYS[2], unpack(ARGV)); "
-                + "local prevSize = redis.call('scard', KEYS[1]); "
-                + "local size = redis.call('sinterstore', KEYS[1], KEYS[1], KEYS[2]);"
-                + "redis.call('del', KEYS[2]); "
-                + "return size ~= prevSize and 1 or 0; ",
-            Arrays.<Object>asList(getName(), "redisson_temp__{" + getName() + "}"), c.toArray());
-    }
-
-    @Override
-    public Future<Boolean> removeAllAsync(Collection<?> c) {
-        if (c.isEmpty()) {
-            return newSucceededFuture(false);
-        }
-        
-        List<Object> args = new ArrayList<Object>(c.size() + 1);
-        args.add(getName());
-        args.addAll(c);
-        
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SREM_SINGLE, args.toArray());
+        return changed;
     }
 
     @Override
     public boolean removeAll(Collection<?> c) {
-        return get(removeAllAsync(c));
-    }
-
-    @Override
-    public int union(String... names) {
-        return get(unionAsync(names));
-    }
-
-    @Override
-    public Future<Integer> unionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
-        args.add(getName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SUNIONSTORE_INT, args.toArray());
-    }
-
-    @Override
-    public Set<V> readUnion(String... names) {
-        return get(readUnionAsync(names));
-    }
-
-    @Override
-    public Future<Set<V>> readUnionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
-        args.add(getName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SUNION, args.toArray());
-    }
-
-    @Override
-    public int diff(String... names) {
-        return get(diffAsync(names));
-    }
-
-    @Override
-    public Future<Integer> diffAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
-        args.add(getName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SDIFFSTORE_INT, args.toArray());
-    }
-
-    @Override
-    public Set<V> readDiff(String... names) {
-        return get(readDiffAsync(names));
-    }
-
-    @Override
-    public Future<Set<V>> readDiffAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
-        args.add(getName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SDIFF, args.toArray());
-    }
-
-    @Override
-    public int intersection(String... names) {
-        return get(intersectionAsync(names));
-    }
-
-    @Override
-    public Future<Integer> intersectionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
-        args.add(getName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SINTERSTORE_INT, args.toArray());
-    }
-
-    @Override
-    public Set<V> readIntersection(String... names) {
-        return get(readIntersectionAsync(names));
-    }
-
-    @Override
-    public Future<Set<V>> readIntersectionAsync(String... names) {
-        List<Object> args = new ArrayList<Object>(names.length + 1);
-        args.add(getName());
-        args.addAll(Arrays.asList(names));
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.SINTER, args.toArray());
-    }
-    
-    @Override
-    public void clear() {
-        delete();
-    }
-
-    @Override
-    public String toString() {
-        Iterator<V> it = iterator();
-        if (! it.hasNext())
-            return "[]";
-
-        StringBuilder sb = new StringBuilder();
-        sb.append('[');
-        for (;;) {
-            V e = it.next();
-            sb.append(e == this ? "(this Collection)" : e);
-            if (! it.hasNext())
-                return sb.append(']').toString();
-            sb.append(',').append(' ');
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            return connection.srem(getName(), c.toArray()) > 0;
+        } finally {
+            connectionManager.release(connection);
         }
     }
-    
+
+    @Override
+    public void clear() {
+        RedisConnection<Object, Object> connection = connectionManager.connection();
+        try {
+            connection.del(getName());
+        } finally {
+            connectionManager.release(connection);
+        }
+    }
+
 }

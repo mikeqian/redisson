@@ -15,98 +15,161 @@
  */
 package org.redisson.connection;
 
-import java.net.InetSocketAddress;
-import java.util.Collection;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Semaphore;
 
-import org.redisson.MasterSlaveServersConfig;
-import org.redisson.client.RedisClient;
-import org.redisson.client.RedisConnection;
-import org.redisson.client.RedisPubSubListener;
-import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.RedisCommand;
-import org.redisson.cluster.ClusterSlotRange;
-import org.redisson.core.NodeType;
-import org.redisson.misc.InfinitySemaphoreLatch;
+import org.redisson.Config;
+import org.redisson.codec.RedisCodecWrapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import io.netty.channel.EventLoopGroup;
-import io.netty.util.Timeout;
-import io.netty.util.TimerTask;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.Promise;
+import com.lambdaworks.redis.RedisClient;
+import com.lambdaworks.redis.RedisConnection;
+import com.lambdaworks.redis.codec.RedisCodec;
+import com.lambdaworks.redis.pubsub.RedisPubSubAdapter;
+import com.lambdaworks.redis.pubsub.RedisPubSubConnection;
+import com.lambdaworks.redis.pubsub.RedisPubSubListener;
 
 /**
  *
  * @author Nikita Koksharov
  *
  */
-public interface ConnectionManager {
+//TODO ping support
+public class ConnectionManager {
 
-    boolean isClusterMode();
+    public static class PubSubEntry {
 
-    <R> Future<R> newSucceededFuture(R value);
+        private final Semaphore semaphore;
+        private final RedisPubSubConnection conn;
+        private final int subscriptionsPerConnection;
 
-    ConnectionEventsHub getConnectionEventsHub();
+        public PubSubEntry(RedisPubSubConnection conn, int subscriptionsPerConnection) {
+            super();
+            this.conn = conn;
+            this.subscriptionsPerConnection = subscriptionsPerConnection;
+            this.semaphore = new Semaphore(subscriptionsPerConnection);
+        }
 
-    boolean isShutdown();
+        public void addListener(RedisPubSubListener listener) {
+            conn.addListener(listener);
+        }
 
-    boolean isShuttingDown();
+        public void removeListener(RedisPubSubListener listener) {
+            conn.removeListener(listener);
+        }
 
-    Promise<PubSubConnectionEntry> subscribe(Codec codec, String channelName, RedisPubSubListener<?> listener);
+        public boolean subscribe(RedisPubSubAdapter listener, Object channel) {
+            if (semaphore.tryAcquire()) {
+                conn.addListener(listener);
+                conn.subscribe(channel);
+                return true;
+            }
+            return false;
+        }
 
-    ConnectionInitializer getConnectListener();
+        public void unsubscribe(Object channel) {
+            conn.unsubscribe(channel);
+            semaphore.release();
+        }
 
-    IdleConnectionWatcher getConnectionWatcher();
+        public boolean tryClose() {
+            if (semaphore.tryAcquire(subscriptionsPerConnection)) {
+                conn.close();
+                return true;
+            }
+            return false;
+        }
 
-    <R> Future<R> newFailedFuture(Throwable cause);
+    }
 
-    Collection<RedisClientEntry> getClients();
+    private final Logger log = LoggerFactory.getLogger(getClass());
 
-    void shutdownAsync(RedisClient client);
+    private final Queue<RedisConnection> connections = new ConcurrentLinkedQueue<RedisConnection>();
+    private final Queue<PubSubEntry> pubSubConnections = new ConcurrentLinkedQueue<PubSubEntry>();
+    private final List<RedisClient> clients = new ArrayList<RedisClient>();
 
-    int calcSlot(String key);
+    private final Semaphore activeConnections;
+    private final RedisCodec codec;
+    private final Config config;
+    private final LoadBalancer balancer;
 
-    MasterSlaveServersConfig getConfig();
+    public ConnectionManager(Config config) {
+        for (URI address : config.getAddresses()) {
+            RedisClient client = new RedisClient(address.getHost(), address.getPort());
+            clients.add(client);
+        }
+        balancer = config.getLoadBalancer();
+        balancer.init(clients);
 
-    Codec getCodec();
+        codec = new RedisCodecWrapper(config.getCodec());
+        activeConnections = new Semaphore(config.getConnectionPoolSize());
+        this.config = config;
+    }
 
-    Map<ClusterSlotRange, MasterSlaveEntry> getEntries();
+    public <K, V> RedisConnection<K, V> connection() {
+        acquireConnection();
 
-    <R> Promise<R> newPromise();
+        RedisConnection<K, V> conn = connections.poll();
+        if (conn == null) {
+            conn = balancer.nextClient().connect(codec);
+            if (config.getPassword() != null) {
+                conn.auth(config.getPassword());
+            }
+        }
+        return conn;
+    }
 
-    void releaseRead(NodeSource source, RedisConnection connection);
+    public <K, V> PubSubEntry subscribe(RedisPubSubAdapter<K, V> listener, K channel) {
+        for (PubSubEntry entry : pubSubConnections) {
+            if (entry.subscribe(listener, channel)) {
+                return entry;
+            }
+        }
 
-    void releaseWrite(NodeSource source, RedisConnection connection);
+        acquireConnection();
 
-    Future<RedisConnection> connectionReadOp(NodeSource source, RedisCommand<?> command);
+        RedisPubSubConnection<K, V> conn = balancer.nextClient().connectPubSub(codec);
+        if (config.getPassword() != null) {
+            conn.auth(config.getPassword());
+        }
+        PubSubEntry entry = new PubSubEntry(conn, config.getSubscriptionsPerConnection());
+        entry.subscribe(listener, channel);
+        pubSubConnections.add(entry);
+        return entry;
+    }
 
-    Future<RedisConnection> connectionWriteOp(NodeSource source, RedisCommand<?> command);
+    private void acquireConnection() {
+        if (!activeConnections.tryAcquire()) {
+            log.warn("Connection pool gets exhausted! Trying to acquire connection ...");
+            long time = System.currentTimeMillis();
+            activeConnections.acquireUninterruptibly();
+            long endTime = System.currentTimeMillis() - time;
+            log.warn("Connection acquired, time spended: {} ms", endTime);
+        }
+    }
 
-    RedisClient createClient(String host, int port, int timeout);
+    public <K> void unsubscribe(PubSubEntry entry, K channel) {
+        entry.unsubscribe(channel);
+        if (entry.tryClose()) {
+            pubSubConnections.remove(entry);
+            activeConnections.release();
+        }
+    }
 
-    RedisClient createClient(NodeType type, String host, int port);
+    public void release(RedisConnection сonnection) {
+        activeConnections.release();
+        connections.add(сonnection);
+    }
 
-    MasterSlaveEntry getEntry(InetSocketAddress addr);
-
-    PubSubConnectionEntry getPubSubEntry(String channelName);
-
-    Future<PubSubConnectionEntry> psubscribe(String pattern, Codec codec);
-
-    Codec unsubscribe(String channelName);
-
-    Codec punsubscribe(String channelName);
-
-    void shutdown();
-
-    void shutdown(long quietPeriod, long timeout, TimeUnit unit);
-    
-    EventLoopGroup getGroup();
-
-    Timeout newTimeout(TimerTask task, long delay, TimeUnit unit);
-
-    InfinitySemaphoreLatch getShutdownLatch();
-    
-    Future<Boolean> getShutdownPromise();
+    public void shutdown() {
+        for (RedisClient client : clients) {
+            client.shutdown();
+        }
+    }
 
 }

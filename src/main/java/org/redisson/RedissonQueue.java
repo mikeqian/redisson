@@ -17,28 +17,22 @@ package org.redisson;
 
 import java.util.NoSuchElementException;
 
-import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RQueue;
 
-import io.netty.util.concurrent.Future;
+import com.lambdaworks.redis.RedisConnection;
 
 /**
- * Distributed and concurrent implementation of {@link java.util.Queue}
+ * Distributed and concurrent implementation of {@link java.util.List}
  *
  * @author Nikita Koksharov
  *
- * @param <V> the type of elements held in this collection
+ * @param <V> value
  */
 public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
 
-    protected RedissonQueue(CommandAsyncExecutor commandExecutor, String name) {
-        super(commandExecutor, name);
-    }
-
-    protected RedissonQueue(Codec codec, CommandAsyncExecutor commandExecutor, String name) {
-        super(codec, commandExecutor, name);
+    RedissonQueue(ConnectionManager connectionManager, String name) {
+        super(connectionManager, name);
     }
 
     @Override
@@ -46,25 +40,30 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
         return add(e);
     }
 
-    @Override
-    public Future<Boolean> offerAsync(V e) {
-        return addAsync(e);
-    }
-
     public V getFirst() {
-        V value = getValue(0);
-        if (value == null) {
-            throw new NoSuchElementException();
+        RedisConnection<String, Object> connection = getConnectionManager().connection();
+        try {
+            V value = (V) connection.lindex(getName(), 0);
+            if (value == null) {
+                throw new NoSuchElementException();
+            }
+            return value;
+        } finally {
+            getConnectionManager().release(connection);
         }
-        return value;
     }
 
     public V removeFirst() {
-        V value = poll();
-        if (value == null) {
-            throw new NoSuchElementException();
+        RedisConnection<String, Object> connection = getConnectionManager().connection();
+        try {
+            V value = (V) connection.lpop(getName());
+            if (value == null) {
+                throw new NoSuchElementException();
+            }
+            return value;
+        } finally {
+            getConnectionManager().release(connection);
         }
-        return value;
     }
 
     @Override
@@ -73,13 +72,13 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
     }
 
     @Override
-    public Future<V> pollAsync() {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.LPOP, getName());
-    }
-
-    @Override
     public V poll() {
-        return get(pollAsync());
+        RedisConnection<String, Object> connection = getConnectionManager().connection();
+        try {
+            return (V) connection.lpop(getName());
+        } finally {
+            getConnectionManager().release(connection);
+        }
     }
 
     @Override
@@ -88,33 +87,11 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
     }
 
     @Override
-    public Future<V> peekAsync() {
-        return getAsync(0);
-    }
-
-    @Override
     public V peek() {
-        return getValue(0);
-    }
-
-    @Override
-    public V pollLastAndOfferFirstTo(String queueName) {
-        return get(pollLastAndOfferFirstToAsync(queueName));
-    }
-
-    @Override
-    public Future<V> pollLastAndOfferFirstToAsync(String queueName) {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.RPOPLPUSH, getName(), queueName);
-    }
-
-    @Override
-    public Future<V> pollLastAndOfferFirstToAsync(RQueue<V> queue) {
-        return pollLastAndOfferFirstToAsync(queue.getName());
-    }
-
-    @Override
-    public V pollLastAndOfferFirstTo(RQueue<V> queue) {
-        return pollLastAndOfferFirstTo(queue.getName());
+        if (isEmpty()) {
+            return null;
+        }
+        return get(0);
     }
 
 }

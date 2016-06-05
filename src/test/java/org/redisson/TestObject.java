@@ -1,8 +1,6 @@
 package org.redisson;
 
-import java.io.Serializable;
-
-public class TestObject implements Comparable<TestObject>, Serializable {
+public class TestObject {
 
     private String name;
     private String value;
@@ -23,16 +21,5 @@ public class TestObject implements Comparable<TestObject>, Serializable {
     public String getValue() {
         return value;
     }
-
-    @Override
-    public int compareTo(TestObject o) {
-        int res = name.compareTo(o.name);
-        if (res == 0) {
-            return value.compareTo(o.value);
-        }
-        return res;
-    }
-
-
 
 }

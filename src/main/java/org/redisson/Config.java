@@ -15,16 +15,15 @@
  */
 package org.redisson;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.Reader;
-import java.net.URL;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.List;
 
-import org.redisson.client.codec.Codec;
 import org.redisson.codec.JsonJacksonCodec;
-
-import io.netty.channel.EventLoopGroup;
+import org.redisson.codec.RedissonCodec;
+import org.redisson.connection.LoadBalancer;
+import org.redisson.connection.RoundRobinLoadBalancer;
 
 /**
  * Redisson configuration
@@ -34,482 +33,132 @@ import io.netty.channel.EventLoopGroup;
  */
 public class Config {
 
-    private SentinelServersConfig sentinelServersConfig;
-
-    private MasterSlaveServersConfig masterSlaveServersConfig;
-
-    private SingleServerConfig singleServerConfig;
-
-    private ClusterServersConfig clusterServersConfig;
-
-    private ElasticacheServersConfig elasticacheServersConfig;
+    /**
+     * Сonnection load balancer to use multiple Redis servers
+     */
+    private LoadBalancer loadBalancer = new RoundRobinLoadBalancer();
 
     /**
-     * Threads amount shared between all redis node clients
+     * Redis key/value codec
      */
-    private int threads = 0; // 0 = current_processors_amount * 2
+    private RedissonCodec codec = new JsonJacksonCodec();
 
     /**
-     * Redis key/value codec. JsonJacksonCodec used by default
+     * Subscriptions per Redis connection limit
      */
-    private Codec codec;
+    private int subscriptionsPerConnection = 5;
 
-    private boolean useLinuxNativeEpoll;
+    /**
+     * Redis connection pool size limit
+     */
+    private int connectionPoolSize = 100;
 
-    private EventLoopGroup eventLoopGroup;
+    /**
+     * Password for Redis authentication. Should be null if not needed
+     */
+    private String password;
+
+    private List<URI> addresses = new ArrayList<URI>();
 
     public Config() {
     }
 
-    public Config(Config oldConf) {
-        setUseLinuxNativeEpoll(oldConf.isUseLinuxNativeEpoll());
-        setEventLoopGroup(oldConf.getEventLoopGroup());
-
-        if (oldConf.getCodec() == null) {
-            // use it by default
-            oldConf.setCodec(new JsonJacksonCodec());
-        }
-
-        setThreads(oldConf.getThreads());
+    Config(Config oldConf) {
         setCodec(oldConf.getCodec());
-        setEventLoopGroup(oldConf.getEventLoopGroup());
-        if (oldConf.getSingleServerConfig() != null) {
-            setSingleServerConfig(new SingleServerConfig(oldConf.getSingleServerConfig()));
-        }
-        if (oldConf.getMasterSlaveServersConfig() != null) {
-            setMasterSlaveServersConfig(new MasterSlaveServersConfig(oldConf.getMasterSlaveServersConfig()));
-        }
-        if (oldConf.getSentinelServersConfig() != null) {
-            setSentinelServersConfig(new SentinelServersConfig(oldConf.getSentinelServersConfig()));
-        }
-        if (oldConf.getClusterServersConfig() != null) {
-            setClusterServersConfig(new ClusterServersConfig(oldConf.getClusterServersConfig()));
-        }
-        if (oldConf.getElasticacheServersConfig() != null) {
-            setElasticacheServersConfig(new ElasticacheServersConfig(oldConf.getElasticacheServersConfig()));
-        }
-
+        setConnectionPoolSize(oldConf.getConnectionPoolSize());
+        setPassword(oldConf.getPassword());
+        setSubscriptionsPerConnection(oldConf.getSubscriptionsPerConnection());
+        setAddresses(oldConf.getAddresses());
+        setLoadBalancer(oldConf.getLoadBalancer());
     }
 
     /**
-     * Redis key/value codec. Default is json-codec
+     * Redis key/value codec. Default is json
      *
-     * @see org.redisson.client.codec.Codec
+     * @see org.redisson.codec.JsonJacksonCodec
+     * @see org.redisson.codec.SerializationCodec
      */
-    public Config setCodec(Codec codec) {
+    public void setCodec(RedissonCodec codec) {
         this.codec = codec;
-        return this;
     }
-
-    public Codec getCodec() {
+    public RedissonCodec getCodec() {
         return codec;
     }
 
     /**
-     * Init cluster servers configuration
+     * Password for Redis authentication. Should be null if not needed
+     * Default is <code>null</code>
      *
-     * @return
+     * @param password
      */
-    public ClusterServersConfig useClusterServers() {
-        return useClusterServers(new ClusterServersConfig());
+    public void setPassword(String password) {
+        this.password = password;
+    }
+    public String getPassword() {
+        return password;
     }
 
     /**
-     * Init cluster servers configuration by config object.
+     * Subscriptions per Redis connection limit
+     * Default is 5
      *
-     * @return
+     * @param subscriptionsPerConnection
      */
-    @Deprecated
-    public ClusterServersConfig useClusterServers(ClusterServersConfig config) {
-        checkMasterSlaveServersConfig();
-        checkSentinelServersConfig();
-        checkSingleServerConfig();
-        checkElasticacheServersConfig();
-
-        if (clusterServersConfig == null) {
-            clusterServersConfig = config;
-        }
-        return clusterServersConfig;
+    public void setSubscriptionsPerConnection(int subscriptionsPerConnection) {
+        this.subscriptionsPerConnection = subscriptionsPerConnection;
     }
-
-    ClusterServersConfig getClusterServersConfig() {
-        return clusterServersConfig;
-    }
-
-    void setClusterServersConfig(ClusterServersConfig clusterServersConfig) {
-        this.clusterServersConfig = clusterServersConfig;
+    public int getSubscriptionsPerConnection() {
+        return subscriptionsPerConnection;
     }
 
     /**
-     * Init AWS Elasticache servers configuration.
+     * Redis connection pool size limit
+     * Default is 100
      *
-     * @return
+     * @param connectionPoolSize
      */
-    public ElasticacheServersConfig useElasticacheServers() {
-        return useElasticacheServers(new ElasticacheServersConfig());
+    public void setConnectionPoolSize(int connectionPoolSize) {
+        this.connectionPoolSize = connectionPoolSize;
+    }
+    public int getConnectionPoolSize() {
+        return connectionPoolSize;
     }
 
     /**
-     * Init AWS Elasticache servers configuration by config object.
+     * Redis server address. Use follow format -- host:port
      *
-     * @return
+     * @param addressesVar
      */
-    @Deprecated
-    public ElasticacheServersConfig useElasticacheServers(ElasticacheServersConfig config) {
-        checkClusterServersConfig();
-        checkMasterSlaveServersConfig();
-        checkSentinelServersConfig();
-        checkSingleServerConfig();
-
-        if (elasticacheServersConfig == null) {
-            elasticacheServersConfig = new ElasticacheServersConfig();
-        }
-        return elasticacheServersConfig;
-    }
-
-    ElasticacheServersConfig getElasticacheServersConfig() {
-        return elasticacheServersConfig;
-    }
-
-    void setElasticacheServersConfig(ElasticacheServersConfig elasticacheServersConfig) {
-        this.elasticacheServersConfig = elasticacheServersConfig;
-    }
-
-    /**
-     * Init single server configuration.
-     *
-     * @return
-     */
-    public SingleServerConfig useSingleServer() {
-        return useSingleServer(new SingleServerConfig());
-    }
-
-    /**
-     * Init single server configuration by config object.
-     *
-     * @return
-     */
-    @Deprecated
-    public SingleServerConfig useSingleServer(SingleServerConfig config) {
-        checkClusterServersConfig();
-        checkMasterSlaveServersConfig();
-        checkSentinelServersConfig();
-        checkElasticacheServersConfig();
-
-        if (singleServerConfig == null) {
-            singleServerConfig = config;
-        }
-        return singleServerConfig;
-    }
-
-    SingleServerConfig getSingleServerConfig() {
-        return singleServerConfig;
-    }
-
-    void setSingleServerConfig(SingleServerConfig singleConnectionConfig) {
-        this.singleServerConfig = singleConnectionConfig;
-    }
-
-    /**
-     * Init sentinel servers configuration.
-     *
-     * @return
-     */
-    public SentinelServersConfig useSentinelServers() {
-        return useSentinelServers(new SentinelServersConfig());
-    }
-
-    /**
-     * Init sentinel servers configuration by config object.
-     *
-     * @return
-     */
-    public SentinelServersConfig useSentinelServers(SentinelServersConfig sentinelServersConfig) {
-        checkClusterServersConfig();
-        checkSingleServerConfig();
-        checkMasterSlaveServersConfig();
-        checkElasticacheServersConfig();
-
-        if (this.sentinelServersConfig == null) {
-            this.sentinelServersConfig = sentinelServersConfig;
-        }
-        return this.sentinelServersConfig;
-    }
-
-    SentinelServersConfig getSentinelServersConfig() {
-        return sentinelServersConfig;
-    }
-
-    void setSentinelServersConfig(SentinelServersConfig sentinelConnectionConfig) {
-        this.sentinelServersConfig = sentinelConnectionConfig;
-    }
-
-    /**
-     * Init master/slave servers configuration.
-     *
-     * @return
-     */
-    public MasterSlaveServersConfig useMasterSlaveServers() {
-        return useMasterSlaveServers(new MasterSlaveServersConfig());
-    }
-
-    /**
-     * Init master/slave servers configuration by config object.
-     *
-     * @return
-     */
-    public MasterSlaveServersConfig useMasterSlaveServers(MasterSlaveServersConfig config) {
-        checkClusterServersConfig();
-        checkSingleServerConfig();
-        checkSentinelServersConfig();
-        checkElasticacheServersConfig();
-
-        if (masterSlaveServersConfig == null) {
-            masterSlaveServersConfig = config;
-        }
-        return masterSlaveServersConfig;
-    }
-
-    MasterSlaveServersConfig getMasterSlaveServersConfig() {
-        return masterSlaveServersConfig;
-    }
-
-    void setMasterSlaveServersConfig(MasterSlaveServersConfig masterSlaveConnectionConfig) {
-        this.masterSlaveServersConfig = masterSlaveConnectionConfig;
-    }
-
-    public boolean isClusterConfig() {
-        return clusterServersConfig != null;
-    }
-
-    public int getThreads() {
-        return threads;
-    }
-
-    /**
-     * Threads amount shared between all redis node clients.
-     * <p/>
-     * Default is <code>0</code>.
-     * <p/>
-     * <code>0</code> means <code>current_processors_amount * 2</code>
-     *
-     * @param threads
-     * @return
-     */
-    public Config setThreads(int threads) {
-        this.threads = threads;
-        return this;
-    }
-
-    private void checkClusterServersConfig() {
-        if (clusterServersConfig != null) {
-            throw new IllegalStateException("cluster servers config already used!");
+    public void addAddress(String ... addressesVar) {
+        for (String address : addressesVar) {
+            try {
+                addresses.add(new URI("//" + address));
+            } catch (URISyntaxException e) {
+                throw new IllegalArgumentException("Can't parse " + address);
+            }
         }
     }
-
-    private void checkSentinelServersConfig() {
-        if (sentinelServersConfig != null) {
-            throw new IllegalStateException("sentinel servers config already used!");
-        }
+    public List<URI> getAddresses() {
+        return addresses;
     }
-
-    private void checkMasterSlaveServersConfig() {
-        if (masterSlaveServersConfig != null) {
-            throw new IllegalStateException("master/slave servers already used!");
-        }
-    }
-
-    private void checkSingleServerConfig() {
-        if (singleServerConfig != null) {
-            throw new IllegalStateException("single server config already used!");
-        }
-    }
-
-    private void checkElasticacheServersConfig() {
-        if (elasticacheServersConfig != null) {
-            throw new IllegalStateException("elasticache replication group servers config already used!");
-        }
+    void setAddresses(List<URI> addresses) {
+        this.addresses = addresses;
     }
 
     /**
-     * Activates an unix socket if servers binded to loopback interface.
-     * Also used for epoll transport activation.
-     * <b>netty-transport-native-epoll</b> library should be in classpath
+     * Сonnection load balancer to multiple Redis servers.
+     * Uses Round-robin algorithm by default
      *
-     * @param useLinuxNativeEpoll
-     * @return
-     */
-    public Config setUseLinuxNativeEpoll(boolean useLinuxNativeEpoll) {
-        this.useLinuxNativeEpoll = useLinuxNativeEpoll;
-        return this;
-    }
-
-    public boolean isUseLinuxNativeEpoll() {
-        return useLinuxNativeEpoll;
-    }
-
-    /**
-     * Use external EventLoopGroup. EventLoopGroup processes all
-     * Netty connection tied with Redis servers. Each EventLoopGroup creates
-     * own threads and each Redisson client creates own EventLoopGroup by default.
-     * So if there are multiple Redisson instances in same JVM
-     * it would be useful to share one EventLoopGroup among them.
-     * <p/>
-     * Only {@link io.netty.channel.epoll.EpollEventLoopGroup} or
-     * {@link io.netty.channel.nio.NioEventLoopGroup} can be used.
+     * @param loadBalancer
      *
-     * @param eventLoopGroup
-     * @return
+     * @see org.redisson.connection.RoundRobinLoadBalancer
+     * @see org.redisson.connection.RandomLoadBalancer
      */
-    public Config setEventLoopGroup(EventLoopGroup eventLoopGroup) {
-        this.eventLoopGroup = eventLoopGroup;
-        return this;
+    public void setLoadBalancer(LoadBalancer loadBalancer) {
+        this.loadBalancer = loadBalancer;
     }
-
-    public EventLoopGroup getEventLoopGroup() {
-        return eventLoopGroup;
-    }
-
-    /**
-     * Read config object stored in JSON format from <code>String</code>
-     *
-     * @param content
-     * @return
-     * @throws IOException
-     */
-    public static Config fromJSON(String content) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(content);
-    }
-
-    /**
-     * Read config object stored in JSON format from <code>InputStream</code>
-     *
-     * @param inputStream
-     * @return
-     * @throws IOException
-     */
-    public static Config fromJSON(InputStream inputStream) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(inputStream);
-    }
-
-    /**
-     * Read config object stored in JSON format from <code>File</code>
-     *
-     * @param file
-     * @return
-     * @throws IOException
-     */
-    public static Config fromJSON(File file) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(file);
-    }
-
-    /**
-     * Read config object stored in JSON format from <code>URL</code>
-     *
-     * @param url
-     * @return
-     * @throws IOException
-     */
-    public static Config fromJSON(URL url) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(url);
-    }
-
-    /**
-     * Read config object stored in JSON format from <code>Reader</code>
-     *
-     * @param reader
-     * @return
-     * @throws IOException
-     */
-    public static Config fromJSON(Reader reader) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromJSON(reader);
-    }
-
-    /**
-     * Convert current configuration to JSON format
-     *
-     * @return
-     * @throws IOException
-     */
-    public String toJSON() throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.toJSON(this);
-    }
-
-    /**
-     * Read config object stored in YAML format from <code>String</code>
-     *
-     * @param content
-     * @return
-     * @throws IOException
-     */
-    public static Config fromYAML(String content) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromYAML(content);
-    }
-
-    /**
-     * Read config object stored in YAML format from <code>InputStream</code>
-     *
-     * @param inputStream
-     * @return
-     * @throws IOException
-     */
-    public static Config fromYAML(InputStream inputStream) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromYAML(inputStream);
-    }
-
-    /**
-     * Read config object stored in YAML format from <code>File</code>
-     *
-     * @param file
-     * @return
-     * @throws IOException
-     */
-    public static Config fromYAML(File file) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromYAML(file);
-    }
-
-    /**
-     * Read config object stored in YAML format from <code>URL</code>
-     *
-     * @param url
-     * @return
-     * @throws IOException
-     */
-    public static Config fromYAML(URL url) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromYAML(url);
-    }
-
-    /**
-     * Read config object stored in YAML format from <code>Reader</code>
-     *
-     * @param reader
-     * @return
-     * @throws IOException
-     */
-    public static Config fromYAML(Reader reader) throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.fromYAML(reader);
-    }
-
-    /**
-     * Convert current configuration to YAML format
-     *
-     * @return
-     * @throws IOException
-     */
-    public String toYAML() throws IOException {
-        ConfigSupport support = new ConfigSupport();
-        return support.toYAML(this);
+    public LoadBalancer getLoadBalancer() {
+        return loadBalancer;
     }
 
 }

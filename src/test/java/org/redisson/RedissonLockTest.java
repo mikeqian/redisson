@@ -1,87 +1,27 @@
 package org.redisson;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 
+import org.junit.After;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 import org.redisson.core.RLock;
 
 public class RedissonLockTest extends BaseConcurrentTest {
 
-    @Test
-    public void testTryLockWait() throws InterruptedException {
-        testSingleInstanceConcurrency(1, r -> {
-            RLock lock = r.getLock("lock");
-            lock.lock();
-        });
+    Redisson redisson = Redisson.create();
 
-        RLock lock = redisson.getLock("lock");
-        
-        long startTime = System.currentTimeMillis();
-        lock.tryLock(3, TimeUnit.SECONDS);
-        assertThat(System.currentTimeMillis() - startTime).isBetween(2990L, 3100L);
-    }
-    
-    @Test
-    public void testDelete() {
-        RLock lock = redisson.getLock("lock");
-        Assert.assertFalse(lock.delete());
-
-        lock.lock();
-        Assert.assertTrue(lock.delete());
+    @Before
+    public void before() {
+        redisson = Redisson.create();
     }
 
-    @Test
-    public void testForceUnlock() {
-        RLock lock = redisson.getLock("lock");
-        lock.lock();
-        lock.forceUnlock();
-        Assert.assertFalse(lock.isLocked());
-
-        lock = redisson.getLock("lock");
-        Assert.assertFalse(lock.isLocked());
-    }
-
-    @Test
-    public void testExpire() throws InterruptedException {
-        RLock lock = redisson.getLock("lock");
-        lock.lock(2, TimeUnit.SECONDS);
-
-        final long startTime = System.currentTimeMillis();
-        Thread t = new Thread() {
-            public void run() {
-                RLock lock1 = redisson.getLock("lock");
-                lock1.lock();
-                long spendTime = System.currentTimeMillis() - startTime;
-                Assert.assertTrue(spendTime < 2020);
-                lock1.unlock();
-            };
-        };
-
-        t.start();
-        t.join();
-
-        lock.unlock();
-    }
-
-    @Test
-    public void testAutoExpire() throws InterruptedException {
-        final CountDownLatch latch = new CountDownLatch(1);
-        testSingleInstanceConcurrency(1, r -> {
-            RLock lock = r.getLock("lock");
-            lock.lock();
-            latch.countDown();
-        });
-
-        Assert.assertTrue(latch.await(1, TimeUnit.SECONDS));
-        RLock lock = redisson.getLock("lock");
-        Thread.sleep(TimeUnit.SECONDS.toMillis(RedissonLock.LOCK_EXPIRATION_INTERVAL_SECONDS + 1));
-        Assert.assertFalse("Transient lock has not expired automatically", lock.isLocked());
+    @After
+    public void after() {
+        redisson.shutdown();
     }
 
     @Test
@@ -107,26 +47,28 @@ public class RedissonLockTest extends BaseConcurrentTest {
         RLock lock = redisson.getLock("lock");
         lock.lock();
 
-        Thread t = new Thread() {
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Thread() {
             public void run() {
                 RLock lock = redisson.getLock("lock");
                 Assert.assertFalse(lock.isHeldByCurrentThread());
+                latch.countDown();
             };
-        };
+        }.start();
 
-        t.start();
-        t.join();
+        latch.await();
         lock.unlock();
 
-        Thread t2 = new Thread() {
+        final CountDownLatch latch2 = new CountDownLatch(1);
+        new Thread() {
             public void run() {
                 RLock lock = redisson.getLock("lock");
                 Assert.assertFalse(lock.isHeldByCurrentThread());
+                latch2.countDown();
             };
-        };
+        }.start();
 
-        t2.start();
-        t2.join();
+        latch2.await();
     }
 
     @Test
@@ -144,26 +86,28 @@ public class RedissonLockTest extends BaseConcurrentTest {
         RLock lock = redisson.getLock("lock");
         lock.lock();
 
-        Thread t = new Thread() {
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Thread() {
             public void run() {
                 RLock lock = redisson.getLock("lock");
                 Assert.assertTrue(lock.isLocked());
+                latch.countDown();
             };
-        };
+        }.start();
 
-        t.start();
-        t.join();
+        latch.await();
         lock.unlock();
 
-        Thread t2 = new Thread() {
+        final CountDownLatch latch2 = new CountDownLatch(1);
+        new Thread() {
             public void run() {
                 RLock lock = redisson.getLock("lock");
                 Assert.assertFalse(lock.isLocked());
+                latch2.countDown();
             };
-        };
+        }.start();
 
-        t2.start();
-        t2.join();
+        latch2.await();
     }
 
     @Test
@@ -177,33 +121,9 @@ public class RedissonLockTest extends BaseConcurrentTest {
     }
 
     @Test(expected = IllegalMonitorStateException.class)
-    public void testUnlockFail() throws InterruptedException {
-        RLock lock = redisson.getLock("lock");
-        Thread t = new Thread() {
-            public void run() {
-                RLock lock = redisson.getLock("lock");
-                lock.lock();
-
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    // TODO Auto-generated catch block
-                    e.printStackTrace();
-                }
-
-                lock.unlock();
-            };
-        };
-
-        t.start();
-        t.join(400);
-
-        try {
-            lock.unlock();
-        } catch (IllegalMonitorStateException e) {
-            t.join();
-            throw e;
-        }
+    public void testUnlockFail() {
+        Lock lock = redisson.getLock("lock1");
+        lock.unlock();
     }
 
 
@@ -218,22 +138,11 @@ public class RedissonLockTest extends BaseConcurrentTest {
     }
 
     @Test
-    public void testReentrancy() throws InterruptedException {
+    public void testReentrancy() {
         Lock lock = redisson.getLock("lock1");
-        Assert.assertTrue(lock.tryLock());
-        Assert.assertTrue(lock.tryLock());
+        lock.lock();
+        lock.lock();
         lock.unlock();
-        // next row  for test renew expiration tisk.
-        //Thread.currentThread().sleep(TimeUnit.SECONDS.toMillis(RedissonLock.LOCK_EXPIRATION_INTERVAL_SECONDS*2));
-        Thread thread1 = new Thread() {
-            @Override
-            public void run() {
-                RLock lock1 = redisson.getLock("lock1");
-                Assert.assertFalse(lock1.tryLock());
-            }
-        };
-        thread1.start();
-        thread1.join();
         lock.unlock();
     }
 
@@ -242,12 +151,15 @@ public class RedissonLockTest extends BaseConcurrentTest {
     public void testConcurrency_SingleInstance() throws InterruptedException {
         final AtomicInteger lockedCounter = new AtomicInteger();
 
-        int iterations = 15;
-        testSingleInstanceConcurrency(iterations, r -> {
-            Lock lock = r.getLock("testConcurrency_SingleInstance");
-            lock.lock();
-            lockedCounter.incrementAndGet();
-            lock.unlock();
+        int iterations = 100;
+        testSingleInstanceConcurrency(iterations, new RedissonRunnable() {
+            @Override
+            public void run(Redisson redisson) {
+                Lock lock = redisson.getLock("testConcurrency_SingleInstance");
+                lock.lock();
+                lockedCounter.set(lockedCounter.get() + 1);
+                lock.unlock();
+            }
         });
 
         Assert.assertEquals(iterations, lockedCounter.get());
@@ -258,16 +170,14 @@ public class RedissonLockTest extends BaseConcurrentTest {
         final int iterations = 100;
         final AtomicInteger lockedCounter = new AtomicInteger();
 
-        testMultiInstanceConcurrency(16, r -> {
-            for (int i = 0; i < iterations; i++) {
-                r.getLock("testConcurrency_MultiInstance1").lock();
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+        testMultiInstanceConcurrency(16, new RedissonRunnable() {
+            @Override
+            public void run(Redisson redisson) {
+                for (int i = 0; i < iterations; i++) {
+                    redisson.getLock("testConcurrency_MultiInstance").lock();
+                    lockedCounter.set(lockedCounter.get() + 1);
+                    redisson.getLock("testConcurrency_MultiInstance").unlock();
                 }
-                lockedCounter.incrementAndGet();
-                r.getLock("testConcurrency_MultiInstance1").unlock();
             }
         });
 
@@ -279,11 +189,14 @@ public class RedissonLockTest extends BaseConcurrentTest {
         int iterations = 100;
         final AtomicInteger lockedCounter = new AtomicInteger();
 
-        testMultiInstanceConcurrency(iterations, r -> {
-            Lock lock = r.getLock("testConcurrency_MultiInstance2");
-            lock.lock();
-            lockedCounter.incrementAndGet();
-            lock.unlock();
+        testMultiInstanceConcurrency(iterations, new RedissonRunnable() {
+            @Override
+            public void run(Redisson redisson) {
+                Lock lock = redisson.getLock("testConcurrency_MultiInstance");
+                lock.lock();
+                lockedCounter.set(lockedCounter.get() + 1);
+                lock.unlock();
+            }
         });
 
         Assert.assertEquals(iterations, lockedCounter.get());

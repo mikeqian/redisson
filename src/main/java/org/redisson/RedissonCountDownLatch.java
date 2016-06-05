@@ -15,17 +15,17 @@
  */
 package org.redisson;
 
-import java.util.Arrays;
-import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.redisson.client.codec.LongCodec;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.connection.ConnectionManager;
+import org.redisson.connection.ConnectionManager.PubSubEntry;
 import org.redisson.core.RCountDownLatch;
-import org.redisson.pubsub.CountDownLatchPubSub;
+import org.redisson.misc.ReclosableLatch;
 
-import io.netty.util.concurrent.Future;
+import com.lambdaworks.redis.RedisConnection;
+import com.lambdaworks.redis.pubsub.RedisPubSubAdapter;
 
 /**
  * Distributed alternative to the {@link java.util.concurrent.CountDownLatch}
@@ -38,137 +38,149 @@ import io.netty.util.concurrent.Future;
  */
 public class RedissonCountDownLatch extends RedissonObject implements RCountDownLatch {
 
-    public static final Long zeroCountMessage = 0L;
-    public static final Long newCountMessage = 1L;
+    private final CountDownLatch subscribeLatch = new CountDownLatch(1);
 
-    private static final CountDownLatchPubSub PUBSUB = new CountDownLatchPubSub();
+    private final String groupName = "redisson_countdownlatch_";
 
-    private final UUID id;
+    private static final Integer zeroCountMessage = 0;
+    private static final Integer newCountMessage = 1;
 
-    protected RedissonCountDownLatch(CommandAsyncExecutor commandExecutor, String name, UUID id) {
-        super(commandExecutor, name);
-        this.id = id;
+    private final AtomicBoolean subscribeOnce = new AtomicBoolean();
+
+    private final ReclosableLatch msg = new ReclosableLatch();
+
+    private final ConnectionManager connectionManager;
+    private PubSubEntry pubSubEntry;
+
+    RedissonCountDownLatch(ConnectionManager connectionManager, String name) {
+        super(name);
+        this.connectionManager = connectionManager;
+    }
+
+    public void subscribe() {
+        if (subscribeOnce.compareAndSet(false, true)) {
+            RedisPubSubAdapter<String, Integer> listener = new RedisPubSubAdapter<String, Integer>() {
+
+                @Override
+                public void subscribed(String channel, long count) {
+                    if (getChannelName().equals(channel)) {
+                        subscribeLatch.countDown();
+                    }
+                }
+
+                @Override
+                public void message(String channel, Integer message) {
+                    if (!getChannelName().equals(channel)) {
+                        return;
+                    }
+                    if (message.equals(zeroCountMessage)) {
+                        msg.open();
+                    }
+                    if (message.equals(newCountMessage)) {
+                        msg.close();
+                    }
+                }
+
+            };
+
+            pubSubEntry = connectionManager.subscribe(listener, getChannelName());
+        }
+
+        try {
+            subscribeLatch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public void await() throws InterruptedException {
-        Future<RedissonCountDownLatchEntry> promise = subscribe();
-        try {
-            get(promise);
-
-            while (getCount() > 0) {
-                // waiting for open state
-                RedissonCountDownLatchEntry entry = getEntry();
-                if (entry != null) {
-                    entry.getLatch().await();
-                }
-            }
-        } finally {
-            unsubscribe(promise);
+        while (getCount() > 0) {
+            // waiting for message
+            msg.await();
         }
     }
+
 
     @Override
     public boolean await(long time, TimeUnit unit) throws InterruptedException {
-        Future<RedissonCountDownLatchEntry> promise = subscribe();
-        try {
-            if (!await(promise, time, unit)) {
+        time = unit.toMillis(time);
+        while (getCount() > 0) {
+            if (time <= 0) {
                 return false;
             }
-
-            time = unit.toMillis(time);
-            while (getCount() > 0) {
-                if (time <= 0) {
-                    return false;
-                }
-                long current = System.currentTimeMillis();
-                // waiting for open state
-                RedissonCountDownLatchEntry entry = getEntry();
-                if (entry != null) {
-                    entry.getLatch().await(time, TimeUnit.MILLISECONDS);
-                }
-
-                long elapsed = System.currentTimeMillis() - current;
-                time = time - elapsed;
-            }
-
-            return true;
-        } finally {
-            unsubscribe(promise);
+            long current = System.currentTimeMillis();
+            // waiting for message
+            msg.await(time, TimeUnit.MILLISECONDS);
+            long elapsed = System.currentTimeMillis() - current;
+            time = time - elapsed;
         }
-    }
 
-    private RedissonCountDownLatchEntry getEntry() {
-        return PUBSUB.getEntry(getEntryName());
-    }
-
-    private Future<RedissonCountDownLatchEntry> subscribe() {
-        return PUBSUB.subscribe(getEntryName(), getChannelName(), commandExecutor.getConnectionManager());
-    }
-
-    private void unsubscribe(Future<RedissonCountDownLatchEntry> future) {
-        PUBSUB.unsubscribe(future.getNow(), getEntryName(), getChannelName(), commandExecutor.getConnectionManager());
+        return true;
     }
 
     @Override
     public void countDown() {
-        get(countDownAsync());
-    }
+        if (getCount() <= 0) {
+            return;
+        }
 
-    @Override
-    public Future<Void> countDownAsync() {
-        return commandExecutor.evalWriteAsync(getName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
-                        "local v = redis.call('decr', KEYS[1]);" +
-                        "if v <= 0 then redis.call('del', KEYS[1]) end;" +
-                        "if v == 0 then redis.call('publish', KEYS[2], ARGV[1]) end;",
-                    Arrays.<Object>asList(getName(), getChannelName()), zeroCountMessage);
-    }
-
-    private String getEntryName() {
-        return id + getName();
+        RedisConnection<String, Object> connection = connectionManager.connection();
+        try {
+            Long val = connection.decr(getName());
+            if (val == 0) {
+                connection.multi();
+                connection.del(getName());
+                connection.publish(getChannelName(), zeroCountMessage);
+                if (connection.exec().size() != 2) {
+                    throw new IllegalStateException();
+                }
+            } else if (val < 0) {
+                connection.del(getName());
+            }
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     private String getChannelName() {
-        return "redisson_countdownlatch__channel__{" + getName() + "}";
+        return groupName + getName();
     }
 
     @Override
     public long getCount() {
-        return get(getCountAsync());
-    }
-
-    @Override
-    public Future<Long> getCountAsync() {
-        return commandExecutor.readAsync(getName(), LongCodec.INSTANCE, RedisCommands.GET_LONG, getName());
+        RedisConnection<String, Object> connection = connectionManager.connection();
+        try {
+            Number val = (Number) connection.get(getName());
+            if (val == null) {
+                return 0;
+            }
+            return val.longValue();
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public boolean trySetCount(long count) {
-        return get(trySetCountAsync(count));
+        RedisConnection<String, Object> connection = connectionManager.connection();
+        try {
+            connection.watch(getName());
+            Long oldValue = (Long) connection.get(getName());
+            if (oldValue != null) {
+                connection.discard();
+                return false;
+            }
+            connection.multi();
+            connection.set(getName(), count);
+            connection.publish(getChannelName(), newCountMessage);
+            return connection.exec().size() == 2;
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
-    @Override
-    public Future<Boolean> trySetCountAsync(long count) {
-        return commandExecutor.evalWriteAsync(getName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
-                "if redis.call('exists', KEYS[1]) == 0 then "
-                    + "redis.call('set', KEYS[1], ARGV[2]); "
-                    + "redis.call('publish', KEYS[2], ARGV[1]); "
-                    + "return 1 "
-                + "else "
-                    + "return 0 "
-                + "end",
-                Arrays.<Object>asList(getName(), getChannelName()), newCountMessage, count);
-    }
-
-    @Override
-    public Future<Boolean> deleteAsync() {
-        return commandExecutor.evalWriteAsync(getName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
-                "if redis.call('del', KEYS[1]) == 1 then "
-                    + "redis.call('publish', KEYS[2], ARGV[1]); "
-                    + "return 1 "
-                + "else "
-                    + "return 0 "
-                + "end",
-                Arrays.<Object>asList(getName(), getChannelName()), newCountMessage);
+    public void close() {
+        connectionManager.unsubscribe(pubSubEntry, getChannelName());
     }
 
 }

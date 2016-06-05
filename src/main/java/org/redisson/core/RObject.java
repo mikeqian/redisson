@@ -21,25 +21,7 @@ package org.redisson.core;
  * @author Nikita Koksharov
  *
  */
-public interface RObject extends RObjectAsync {
-
-    /**
-     * Transfer an object from source Redis instance to destination Redis instance
-     *
-     * @param host - destination host
-     * @param port - destination port
-     * @param database - destination database
-     * @return
-     */
-    void migrate(String host, int port, int database);
-
-    /**
-     * Move object to another database
-     *
-     * @param database
-     * @return <code>true</code> if key was moved else <code>false</code>
-     */
-    boolean move(int database);
+public interface RObject {
 
     /**
      * Returns name of object
@@ -47,33 +29,5 @@ public interface RObject extends RObjectAsync {
      * @return name
      */
     String getName();
-
-    /**
-     * Deletes the object
-     */
-    boolean delete();
-
-    /**
-     * Rename current object key to <code>newName</code>
-     *
-     * @param newName
-     */
-    void rename(String newName);
-
-    /**
-     * Rename current object key to <code>newName</code>
-     * only if new key is not exists
-     *
-     * @param newName
-     * @return
-     */
-    boolean renamenx(String newName);
-
-    /**
-     * Check object existence
-     *
-     * @return <code>true</code> if object exists and <code>false</code> otherwise
-     */
-    boolean isExists();
 
 }

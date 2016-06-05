@@ -15,15 +15,6 @@
  */
 package org.redisson;
 
-import static org.redisson.client.protocol.RedisCommands.EVAL_OBJECT;
-import static org.redisson.client.protocol.RedisCommands.LINDEX;
-import static org.redisson.client.protocol.RedisCommands.LLEN_INT;
-import static org.redisson.client.protocol.RedisCommands.LPOP;
-import static org.redisson.client.protocol.RedisCommands.LPUSH_BOOLEAN;
-import static org.redisson.client.protocol.RedisCommands.LRANGE;
-import static org.redisson.client.protocol.RedisCommands.LREM_SINGLE;
-import static org.redisson.client.protocol.RedisCommands.RPUSH_BOOLEAN;
-
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -32,45 +23,41 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.NoSuchElementException;
 
-import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.RedisCommand;
-import org.redisson.client.protocol.RedisCommand.ValueType;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.client.protocol.convertor.BooleanNumberReplayConvertor;
-import org.redisson.client.protocol.convertor.BooleanReplayConvertor;
-import org.redisson.client.protocol.convertor.Convertor;
-import org.redisson.client.protocol.convertor.IntegerReplayConvertor;
-import org.redisson.command.CommandAsyncExecutor;
+import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RList;
 
-import io.netty.util.concurrent.Future;
+import com.lambdaworks.redis.RedisConnection;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.List}
  *
  * @author Nikita Koksharov
  *
- * @param <V> the type of elements held in this collection
+ * @param <V> value
  */
-public class RedissonList<V> extends RedissonExpirable implements RList<V> {
+public class RedissonList<V> extends RedissonObject implements RList<V> {
 
-    public static final RedisCommand<Boolean> EVAL_BOOLEAN_ARGS2 = new RedisCommand<Boolean>("EVAL", new BooleanReplayConvertor(), 5, ValueType.OBJECTS);
+    private int batchSize = 50;
 
-    public RedissonList(CommandAsyncExecutor commandExecutor, String name) {
-        super(commandExecutor, name);
+    private final ConnectionManager connectionManager;
+
+    RedissonList(ConnectionManager connectionManager, String name) {
+        super(name);
+        this.connectionManager = connectionManager;
     }
 
-    public RedissonList(Codec codec, CommandAsyncExecutor commandExecutor, String name) {
-        super(codec, commandExecutor, name);
+    protected ConnectionManager getConnectionManager() {
+        return connectionManager;
     }
 
     @Override
     public int size() {
-        return get(sizeAsync());
-    }
-
-    public Future<Integer> sizeAsync() {
-        return commandExecutor.readAsync(getName(), codec, LLEN_INT, getName());
+        RedisConnection<String, Object> connection = connectionManager.connection();
+        try {
+            return connection.llen(getName()).intValue();
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
@@ -80,7 +67,7 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
 
     @Override
     public boolean contains(Object o) {
-        return get(containsAsync(o));
+        return indexOf(o) != -1;
     }
 
     @Override
@@ -90,200 +77,146 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
 
     @Override
     public Object[] toArray() {
-        List<V> list = readAll();
+        List<V> list = subList(0, size());
         return list.toArray();
     }
 
     @Override
-    public List<V> readAll() {
-        return get(readAllAsync());
-    }
-
-    @Override
-    public Future<List<V>> readAllAsync() {
-        return commandExecutor.readAsync(getName(), codec, LRANGE, getName(), 0, -1);
-    }
-
-    @Override
     public <T> T[] toArray(T[] a) {
-        List<V> list = readAll();
+        List<V> list = subList(0, size());
         return list.toArray(a);
     }
 
     @Override
     public boolean add(V e) {
-        return get(addAsync(e));
-    }
-
-    @Override
-    public Future<Boolean> addAsync(V e) {
-        return commandExecutor.writeAsync(getName(), codec, RPUSH_BOOLEAN, getName(), e);
+        return addAll(Collections.singleton(e));
     }
 
     @Override
     public boolean remove(Object o) {
-        return get(removeAsync(o));
-    }
-
-    @Override
-    public Future<Boolean> removeAsync(Object o) {
-        return removeAsync(o, 1);
-    }
-
-    protected Future<Boolean> removeAsync(Object o, int count) {
-        return commandExecutor.writeAsync(getName(), codec, LREM_SINGLE, getName(), count, o);
-    }
-
-    protected boolean remove(Object o, int count) {
-        return get(removeAsync(o, count));
-    }
-
-    @Override
-    public Future<Boolean> containsAllAsync(Collection<?> c) {
-        return commandExecutor.evalReadAsync(getName(), codec, RedisCommands.EVAL_BOOLEAN_WITH_VALUES,
-                "local items = redis.call('lrange', KEYS[1], 0, -1) " +
-                "for i=1, #items do " +
-                    "for j = 1, #ARGV, 1 do " +
-                        "if items[i] == ARGV[j] then " +
-                            "table.remove(ARGV, j) " +
-                        "end " +
-                    "end " +
-                "end " +
-                "return #ARGV == 0 and 1 or 0",
-                Collections.<Object>singletonList(getName()), c.toArray());
+        RedisConnection<String, Object> connection = connectionManager.connection();
+        try {
+            return connection.lrem(getName(), 1, o) > 0;
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
     @Override
     public boolean containsAll(Collection<?> c) {
-        return get(containsAllAsync(c));
+        if (isEmpty()) {
+            return false;
+        }
+
+        RedisConnection<String, Object> connection = connectionManager.connection();
+        try {
+            Collection<Object> copy = new ArrayList<Object>(c);
+            int to = div(size(), batchSize);
+            for (int i = 0; i < to; i++) {
+                List<Object> range = connection.lrange(getName(), i*batchSize, i*batchSize + batchSize - 1);
+                for (Iterator<Object> iterator = copy.iterator(); iterator.hasNext();) {
+                    Object obj = iterator.next();
+                    int index = range.indexOf(obj);
+                    if (index != -1) {
+                        iterator.remove();
+                    }
+                }
+            }
+
+            return copy.isEmpty();
+        } finally {
+            connectionManager.release(connection);
+        }
+
     }
 
     @Override
     public boolean addAll(Collection<? extends V> c) {
-        return get(addAllAsync(c));
-    }
-
-    @Override
-    public Future<Boolean> addAllAsync(final Collection<? extends V> c) {
-        if (c.isEmpty()) {
-            return newSucceededFuture(false);
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            conn.rpush(getName(), c.toArray());
+            return true;
+        } finally {
+            connectionManager.release(conn);
         }
-
-        List<Object> args = new ArrayList<Object>(c.size() + 1);
-        args.add(getName());
-        args.addAll(c);
-        return commandExecutor.writeAsync(getName(), codec, RPUSH_BOOLEAN, args.toArray());
-    }
-
-    public Future<Boolean> addAllAsync(int index, Collection<? extends V> coll) {
-        if (index < 0) {
-            throw new IndexOutOfBoundsException("index: " + index);
-        }
-
-        if (coll.isEmpty()) {
-            return newSucceededFuture(false);
-        }
-
-        if (index == 0) { // prepend elements to list
-            List<Object> elements = new ArrayList<Object>(coll);
-            Collections.reverse(elements);
-            elements.add(0, getName());
-
-            return commandExecutor.writeAsync(getName(), codec, LPUSH_BOOLEAN, elements.toArray());
-        }
-
-        List<Object> args = new ArrayList<Object>(coll.size() + 1);
-        args.add(index);
-        args.addAll(coll);
-        return commandExecutor.evalWriteAsync(getName(), codec, EVAL_BOOLEAN_ARGS2,
-                "local ind = table.remove(ARGV, 1); " + // index is the first parameter
-                        "local size = redis.call('llen', KEYS[1]); " +
-                        "assert(tonumber(ind) <= size, 'index: ' .. ind .. ' but current size: ' .. size); " +
-                        "local tail = redis.call('lrange', KEYS[1], ind, -1); " +
-                        "redis.call('ltrim', KEYS[1], 0, ind - 1); " +
-                        "for i=1, #ARGV, 5000 do "
-                            + "redis.call('rpush', KEYS[1], unpack(ARGV, i, math.min(i+4999, #ARGV))); "
-                        + "end " +
-                        "if #tail > 0 then " +
-                            "for i=1, #tail, 5000 do "
-                                + "redis.call('rpush', KEYS[1], unpack(tail, i, math.min(i+4999, #tail))); "
-                          + "end "
-                      + "end;" +
-                        "return 1;",
-                Collections.<Object>singletonList(getName()), args.toArray());
     }
 
     @Override
     public boolean addAll(int index, Collection<? extends V> coll) {
-        return get(addAllAsync(index, coll));
-    }
+        checkPosition(index);
+        if (index < size()) {
+            RedisConnection<String, Object> conn = connectionManager.connection();
+            try {
+                while (true) {
+                    conn.watch(getName());
+                    List<Object> tail = conn.lrange(getName(), index, size());
 
-    @Override
-    public Future<Boolean> removeAllAsync(Collection<?> c) {
-        return commandExecutor.evalWriteAsync(getName(), codec, RedisCommands.EVAL_BOOLEAN_WITH_VALUES,
-                        "local v = 0 " +
-                        "for i = 1, #ARGV, 1 do "
-                            + "if redis.call('lrem', KEYS[1], 0, ARGV[i]) == 1 "
-                            + "then v = 1 end "
-                        +"end "
-                       + "return v ",
-                Collections.<Object>singletonList(getName()), c.toArray());
+                    conn.multi();
+                    conn.ltrim(getName(), 0, index - 1);
+                    conn.rpush(getName(), coll.toArray());
+                    conn.rpush(getName(), tail.toArray());
+                    if (conn.exec().size() == 3) {
+                        return true;
+                    }
+                }
+            } finally {
+                connectionManager.release(conn);
+            }
+        } else {
+            return addAll(coll);
+        }
     }
 
     @Override
     public boolean removeAll(Collection<?> c) {
-        return get(removeAllAsync(c));
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            boolean result = false;
+            for (Object object : c) {
+                boolean res = conn.lrem(getName(), 0, object) > 0;
+                if (!result) {
+                    result = res;
+                }
+            }
+            return result;
+        } finally {
+            connectionManager.release(conn);
+        }
+
     }
 
     @Override
     public boolean retainAll(Collection<?> c) {
-        return get(retainAllAsync(c));
+        boolean changed = false;
+        for (Iterator<V> iterator = iterator(); iterator.hasNext();) {
+            V object = iterator.next();
+            if (!c.contains(object)) {
+                iterator.remove();
+                changed = true;
+            }
+        }
+        return changed;
     }
-
-    @Override
-    public Future<Boolean> retainAllAsync(Collection<?> c) {
-        return commandExecutor.evalWriteAsync(getName(), codec, RedisCommands.EVAL_BOOLEAN_WITH_VALUES,
-                "local changed = 0 " +
-                "local items = redis.call('lrange', KEYS[1], 0, -1) "
-                   + "local i = 1 "
-                   + "while i <= #items do "
-                        + "local element = items[i] "
-                        + "local isInAgrs = false "
-                        + "for j = 1, #ARGV, 1 do "
-                            + "if ARGV[j] == element then "
-                                + "isInAgrs = true "
-                                + "break "
-                            + "end "
-                        + "end "
-                        + "if isInAgrs == false then "
-                            + "redis.call('LREM', KEYS[1], 0, element) "
-                            + "changed = 1 "
-                        + "end "
-                        + "i = i + 1 "
-                   + "end "
-                   + "return changed ",
-                Collections.<Object>singletonList(getName()), c.toArray());
-    }
-
 
     @Override
     public void clear() {
-        delete();
-    }
-
-    @Override
-    public Future<V> getAsync(int index) {
-        return commandExecutor.readAsync(getName(), codec, LINDEX, getName(), index);
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            conn.del(getName());
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     @Override
     public V get(int index) {
         checkIndex(index);
-        return getValue(index);
-    }
-
-    V getValue(int index) {
-        return get(getAsync(index));
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            return (V) conn.lindex(getName(), index);
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     private void checkIndex(int index) {
@@ -296,29 +229,28 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
         return index >= 0 && index < size;
     }
 
+    private void checkPosition(int index) {
+        int size = size();
+        if (!isPositionInRange(index, size))
+            throw new IndexOutOfBoundsException("index: " + index + " but current size: "+ size);
+    }
+
+    private boolean isPositionInRange(int index, int size) {
+        return index >= 0 && index <= size;
+    }
+
+
     @Override
     public V set(int index, V element) {
         checkIndex(index);
-        return get(setAsync(index, element));
-    }
-
-    @Override
-    public Future<V> setAsync(int index, V element) {
-        return commandExecutor.evalWriteAsync(getName(), codec, new RedisCommand<Object>("EVAL", 5),
-                "local v = redis.call('lindex', KEYS[1], ARGV[1]); " +
-                        "redis.call('lset', KEYS[1], ARGV[1], ARGV[2]); " +
-                        "return v",
-                Collections.<Object>singletonList(getName()), index, element);
-    }
-
-    @Override
-    public void fastSet(int index, V element) {
-        get(fastSetAsync(index, element));
-    }
-
-    @Override
-    public Future<Void> fastSetAsync(int index, V element) {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.LSET, getName(), index, element);
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            V prev = (V) conn.lindex(getName(), index);
+            conn.lset(getName(), index, element);
+            return prev;
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     @Override
@@ -326,86 +258,89 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
         addAll(index, Collections.singleton(element));
     }
 
+    private int div(int p, int q) {
+        int div = p / q;
+        int rem = p - q * div; // equal to p % q
+
+        if (rem == 0) {
+          return div;
+        }
+
+        return div + 1;
+    }
+
     @Override
     public V remove(int index) {
         checkIndex(index);
 
-        if (index == 0) {
-            Future<V> f = commandExecutor.writeAsync(getName(), codec, LPOP, getName());
-            return get(f);
-        }
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            if (index == 0) {
+                return (V) conn.lpop(getName());
+            }
+            while (true) {
+                conn.watch(getName());
+                V prev = (V) conn.lindex(getName(), index);
+                List<Object> tail = conn.lrange(getName(), index + 1, size());
 
-        Future<V> f = commandExecutor.evalWriteAsync(getName(), codec, EVAL_OBJECT,
-                "local v = redis.call('lindex', KEYS[1], ARGV[1]); " +
-                        "local tail = redis.call('lrange', KEYS[1], ARGV[1] + 1, -1);" +
-                        "redis.call('ltrim', KEYS[1], 0, ARGV[1] - 1);" +
-                        "if #tail > 0 then " +
-                            "for i=1, #tail, 5000 do "
-                                + "redis.call('rpush', KEYS[1], unpack(tail, i, math.min(i+4999, #tail))); "
-                          + "end "
-                      + "end;" +
-                        "return v",
-                Collections.<Object>singletonList(getName()), index);
-        return get(f);
+                conn.multi();
+                conn.ltrim(getName(), 0, index - 1);
+                conn.rpush(getName(), tail.toArray());
+                if (conn.exec().size() == 2) {
+                    return prev;
+                }
+            }
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     @Override
     public int indexOf(Object o) {
-        return get(indexOfAsync(o));
-    }
+        if (isEmpty()) {
+            return -1;
+        }
 
-    @Override
-    public Future<Boolean> containsAsync(Object o) {
-        return indexOfAsync(o, new BooleanNumberReplayConvertor(-1L));
-    }
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            int to = div(size(), batchSize);
+            for (int i = 0; i < to; i++) {
+                List<Object> range = conn.lrange(getName(), i*batchSize, i*batchSize + batchSize - 1);
+                int index = range.indexOf(o);
+                if (index != -1) {
+                    return index + i*batchSize;
+                }
+            }
 
-    private <R> Future<R> indexOfAsync(Object o, Convertor<R> convertor) {
-        return commandExecutor.evalReadAsync(getName(), codec, new RedisCommand<R>("EVAL", convertor, 4),
-                "local key = KEYS[1] " +
-                "local obj = ARGV[1] " +
-                "local items = redis.call('lrange', key, 0, -1) " +
-                "for i=1,#items do " +
-                    "if items[i] == obj then " +
-                        "return i - 1 " +
-                    "end " +
-                "end " +
-                "return -1",
-                Collections.<Object>singletonList(getName()), o);
-    }
-
-    @Override
-    public Future<Integer> indexOfAsync(Object o) {
-        return indexOfAsync(o, new IntegerReplayConvertor());
+            return -1;
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     @Override
     public int lastIndexOf(Object o) {
-        return get(lastIndexOfAsync(o));
-    }
+        if (isEmpty()) {
+            return -1;
+        }
 
-    @Override
-    public Future<Integer> lastIndexOfAsync(Object o) {
-        return commandExecutor.evalReadAsync(getName(), codec, new RedisCommand<Integer>("EVAL", new IntegerReplayConvertor(), 4),
-                "local key = KEYS[1] " +
-                "local obj = ARGV[1] " +
-                "local items = redis.call('lrange', key, 0, -1) " +
-                "for i = #items, 1, -1 do " +
-                    "if items[i] == obj then " +
-                        "return i - 1 " +
-                    "end " +
-                "end " +
-                "return -1",
-                Collections.<Object>singletonList(getName()), o);
-    }
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            int size = size();
+            int to = div(size, batchSize);
+            for (int i = 1; i <= to; i++) {
+                int startIndex = -i*batchSize;
+                List<Object> range = conn.lrange(getName(), startIndex, size - (i-1)*batchSize);
+                int index = range.lastIndexOf(o);
+                if (index != -1) {
+                    return Math.max(size + startIndex, 0) + index;
+                }
+            }
 
-    @Override
-    public void trim(int fromIndex, int toIndex) {
-        get(trimAsync(fromIndex, toIndex));
-    }
-
-    @Override
-    public Future<Void> trimAsync(int fromIndex, int toIndex) {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.LTRIM, getName(), fromIndex, toIndex);
+            return -1;
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     @Override
@@ -417,69 +352,50 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
     public ListIterator<V> listIterator(final int ind) {
         return new ListIterator<V>() {
 
-            private V prevCurrentValue;
-            private V nextCurrentValue;
-            private V currentValueHasRead;
             private int currentIndex = ind - 1;
-            private boolean hasBeenModified = true;
+            private boolean removeExecuted;
 
             @Override
             public boolean hasNext() {
-                V val = RedissonList.this.getValue(currentIndex+1);
-                if (val != null) {
-                    nextCurrentValue = val;
-                }
-                return val != null;
+                int size = size();
+                return currentIndex+1 < size && size > 0;
             }
 
             @Override
             public V next() {
-                if (nextCurrentValue == null && !hasNext()) {
+                if (!hasNext()) {
                     throw new NoSuchElementException("No such element at index " + currentIndex);
                 }
                 currentIndex++;
-                currentValueHasRead = nextCurrentValue;
-                nextCurrentValue = null;
-                hasBeenModified = false;
-                return currentValueHasRead;
+                removeExecuted = false;
+                return RedissonList.this.get(currentIndex);
             }
 
             @Override
             public void remove() {
-                if (currentValueHasRead == null) {
-                    throw new IllegalStateException("Neither next nor previous have been called");
-                }
-                if (hasBeenModified) {
+                if (removeExecuted) {
                     throw new IllegalStateException("Element been already deleted");
                 }
                 RedissonList.this.remove(currentIndex);
                 currentIndex--;
-                hasBeenModified = true;
-                currentValueHasRead = null;
+                removeExecuted = true;
             }
 
             @Override
             public boolean hasPrevious() {
-                if (currentIndex < 0) {
-                    return false;
-                }
-                V val = RedissonList.this.getValue(currentIndex);
-                if (val != null) {
-                    prevCurrentValue = val;
-                }
-                return val != null;
+                int size = size();
+                return currentIndex-1 < size && size > 0 && currentIndex >= 0;
             }
 
             @Override
             public V previous() {
-                if (prevCurrentValue == null && !hasPrevious()) {
+                if (!hasPrevious()) {
                     throw new NoSuchElementException("No such element at index " + currentIndex);
                 }
+                removeExecuted = false;
+                V res = RedissonList.this.get(currentIndex);
                 currentIndex--;
-                hasBeenModified = false;
-                currentValueHasRead = prevCurrentValue;
-                prevCurrentValue = null;
-                return currentValueHasRead;
+                return res;
             }
 
             @Override
@@ -494,24 +410,22 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
 
             @Override
             public void set(V e) {
-                if (hasBeenModified) {
+                if (currentIndex >= size()-1) {
                     throw new IllegalStateException();
                 }
-
-                RedissonList.this.fastSet(currentIndex, e);
+                RedissonList.this.set(currentIndex, e);
             }
 
             @Override
             public void add(V e) {
                 RedissonList.this.add(currentIndex+1, e);
                 currentIndex++;
-                hasBeenModified = true;
             }
         };
     }
 
     @Override
-    public RList<V> subList(int fromIndex, int toIndex) {
+    public List<V> subList(int fromIndex, int toIndex) {
         int size = size();
         if (fromIndex < 0 || toIndex > size) {
             throw new IndexOutOfBoundsException("fromIndex: " + fromIndex + " toIndex: " + toIndex + " size: " + size);
@@ -520,7 +434,12 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
             throw new IllegalArgumentException("fromIndex: " + fromIndex + " toIndex: " + toIndex);
         }
 
-        return new RedissonSubList<V>(codec, commandExecutor, getName(), fromIndex, toIndex);
+        RedisConnection<String, Object> conn = connectionManager.connection();
+        try {
+            return (List<V>) conn.lrange(getName(), fromIndex, toIndex - 1);
+        } finally {
+            connectionManager.release(conn);
+        }
     }
 
     public String toString() {
@@ -537,53 +456,6 @@ public class RedissonList<V> extends RedissonExpirable implements RList<V> {
                 return sb.append(']').toString();
             sb.append(',').append(' ');
         }
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (o == this)
-            return true;
-        if (!(o instanceof List))
-            return false;
-
-        Iterator<V> e1 = iterator();
-        Iterator<?> e2 = ((List<?>) o).iterator();
-        while (e1.hasNext() && e2.hasNext()) {
-            V o1 = e1.next();
-            Object o2 = e2.next();
-            if (!(o1==null ? o2==null : o1.equals(o2)))
-                return false;
-        }
-        return !(e1.hasNext() || e2.hasNext());
-    }
-
-    @Override
-    public int hashCode() {
-        int hashCode = 1;
-        for (V e : this) {
-            hashCode = 31*hashCode + (e==null ? 0 : e.hashCode());
-        }
-        return hashCode;
-    }
-
-    @Override
-    public Future<Integer> addAfterAsync(V elementToFind, V element) {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.LINSERT_INT, getName(), "AFTER", elementToFind, element);
-    }
-
-    @Override
-    public Future<Integer> addBeforeAsync(V elementToFind, V element) {
-        return commandExecutor.writeAsync(getName(), codec, RedisCommands.LINSERT_INT, getName(), "BEFORE", elementToFind, element);
-    }
-
-    @Override
-    public Integer addAfter(V elementToFind, V element) {
-        return get(addAfterAsync(elementToFind, element));
-    }
-
-    @Override
-    public Integer addBefore(V elementToFind, V element) {
-        return get(addBeforeAsync(elementToFind, element));
     }
 
 }

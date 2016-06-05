@@ -15,148 +15,76 @@
  */
 package org.redisson.codec;
 
-import java.io.IOException;
-
-import org.redisson.client.codec.Codec;
-import org.redisson.client.handler.State;
-import org.redisson.client.protocol.Decoder;
-import org.redisson.client.protocol.Encoder;
+import java.nio.ByteBuffer;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
-import com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility;
-import com.fasterxml.jackson.annotation.JsonIdentityInfo;
-import com.fasterxml.jackson.annotation.JsonIdentityReference;
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonInclude.Include;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import com.fasterxml.jackson.annotation.ObjectIdGenerators;
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectMapper.DefaultTypeResolverBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper.DefaultTyping;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.annotation.JsonTypeIdResolver;
 import com.fasterxml.jackson.databind.jsontype.TypeResolverBuilder;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufInputStream;
-
 /**
- *
- * @see org.redisson.codec.CborJacksonCodec
- * @see org.redisson.codec.MsgPackJacksonCodec
  *
  * @author Nikita Koksharov
  *
  */
-public class JsonJacksonCodec implements Codec {
+public class JsonJacksonCodec implements RedissonCodec {
 
-    public static final JsonJacksonCodec INSTANCE = new JsonJacksonCodec();
-
-    @JsonIdentityInfo(generator=ObjectIdGenerators.IntSequenceGenerator.class, property="@id")
-    @JsonAutoDetect(fieldVisibility = Visibility.NONE, getterVisibility = Visibility.PUBLIC_ONLY, setterVisibility = Visibility.PUBLIC_ONLY, isGetterVisibility = Visibility.PUBLIC_ONLY)
-    public static class ThrowableMixIn {
-        
-    }
-    
-    private final ObjectMapper mapObjectMapper = initObjectMapper();
-
-    protected ObjectMapper initObjectMapper() {
-        return new ObjectMapper();
-    }
-
-    private final Encoder encoder = new Encoder() {
-        @Override
-        public byte[] encode(Object in) throws IOException {
-            return mapObjectMapper.writeValueAsBytes(in);
-        }
-    };
-
-    private final Decoder<Object> decoder = new Decoder<Object>() {
-        @Override
-        public Object decode(ByteBuf buf, State state) throws IOException {
-            return mapObjectMapper.readValue(new ByteBufInputStream(buf), Object.class);
-        }
-    };
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public JsonJacksonCodec() {
-        init(mapObjectMapper);
-        // type info inclusion
-        TypeResolverBuilder<?> mapTyper = new DefaultTypeResolverBuilder(DefaultTyping.NON_FINAL) {
-            public boolean useForType(JavaType t) {
-                switch (_appliesFor) {
-                case NON_CONCRETE_AND_ARRAYS:
-                    while (t.isArrayType()) {
-                        t = t.getContentType();
-                    }
-                    // fall through
-                case OBJECT_AND_NON_CONCRETE:
-                    return (t.getRawClass() == Object.class) || !t.isConcrete();
-                case NON_FINAL:
-                    while (t.isArrayType()) {
-                        t = t.getContentType();
-                    }
-                    // to fix problem with wrong long to int conversion
-                    if (t.getRawClass() == Long.class) {
-                        return true;
-                    }
-                    return !t.isFinal(); // includes Object.class
-                default:
-                    // case JAVA_LANG_OBJECT:
-                    return (t.getRawClass() == Object.class);
-                }
-            }
-        };
-        mapTyper.init(JsonTypeInfo.Id.CLASS, null);
-        mapTyper.inclusion(JsonTypeInfo.As.PROPERTY);
-        mapObjectMapper.setDefaultTyping(mapTyper);
-    }
-
-    protected void init(ObjectMapper objectMapper) {
         objectMapper.setSerializationInclusion(Include.NON_NULL);
         objectMapper.setVisibilityChecker(objectMapper.getSerializationConfig().getDefaultVisibilityChecker()
-                .withFieldVisibility(JsonAutoDetect.Visibility.ANY).withGetterVisibility(JsonAutoDetect.Visibility.NONE)
-                .withSetterVisibility(JsonAutoDetect.Visibility.NONE)
-                .withCreatorVisibility(JsonAutoDetect.Visibility.NONE));
+                                            .withFieldVisibility(JsonAutoDetect.Visibility.ANY)
+                                            .withGetterVisibility(JsonAutoDetect.Visibility.NONE)
+                                            .withSetterVisibility(JsonAutoDetect.Visibility.NONE)
+                                            .withCreatorVisibility(JsonAutoDetect.Visibility.NONE));
         objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         objectMapper.configure(SerializationFeature.WRITE_BIGDECIMAL_AS_PLAIN, true);
-        objectMapper.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
         objectMapper.configure(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY, true);
-        objectMapper.addMixIn(Throwable.class, ThrowableMixIn.class);
+
+        // type info inclusion
+        TypeResolverBuilder<?> typer = new DefaultTypeResolverBuilder(DefaultTyping.NON_FINAL);
+        typer.init(JsonTypeInfo.Id.CLASS, null);
+        typer.inclusion(JsonTypeInfo.As.PROPERTY);
+        objectMapper.setDefaultTyping(typer);
     }
 
     @Override
-    public Decoder<Object> getMapValueDecoder() {
-        return decoder;
+    public Object decodeKey(ByteBuffer bytes) {
+        return decode(bytes);
     }
 
     @Override
-    public Encoder getMapValueEncoder() {
-        return encoder;
+    public Object decodeValue(ByteBuffer bytes) {
+        return decode(bytes);
+    }
+
+    private Object decode(ByteBuffer bytes) {
+        try {
+            return objectMapper.readValue(bytes.array(), bytes.arrayOffset() + bytes.position(), bytes.limit(), Object.class);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Override
-    public Decoder<Object> getMapKeyDecoder() {
-        return getMapValueDecoder();
+    public byte[] encodeKey(Object key) {
+        return encodeValue(key);
     }
 
     @Override
-    public Encoder getMapKeyEncoder() {
-        return getMapValueEncoder();
-    }
-
-    @Override
-    public Decoder<Object> getValueDecoder() {
-        return getMapValueDecoder();
-    }
-
-    @Override
-    public Encoder getValueEncoder() {
-        return getMapValueEncoder();
+    public byte[] encodeValue(Object value) {
+        try {
+            return objectMapper.writeValueAsBytes(value);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
 }

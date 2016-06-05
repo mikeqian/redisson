@@ -15,80 +15,55 @@
  */
 package org.redisson.codec;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-
-import org.redisson.client.codec.Codec;
-import org.redisson.client.handler.State;
-import org.redisson.client.protocol.Decoder;
-import org.redisson.client.protocol.Encoder;
-
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufInputStream;
+import java.nio.ByteBuffer;
 
 /**
  *
  * @author Nikita Koksharov
  *
  */
-public class SerializationCodec implements Codec {
+public class SerializationCodec implements RedissonCodec {
 
-    private final Decoder<Object> decoder = new Decoder<Object>() {
-        @Override
-        public Object decode(ByteBuf buf, State state) throws IOException {
-            try {
-                ObjectInputStream inputStream = new ObjectInputStream(new ByteBufInputStream(buf));
-                return inputStream.readObject();
-            } catch (IOException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new IOException(e);
-            }
+    @Override
+    public Object decodeKey(ByteBuffer bytes) {
+        return decode(bytes);
+    }
+
+    @Override
+    public Object decodeValue(ByteBuffer bytes) {
+        return decode(bytes);
+    }
+
+    private Object decode(ByteBuffer bytes) {
+        try {
+            ByteArrayInputStream in = new ByteArrayInputStream(bytes.array(), bytes.arrayOffset() + bytes.position(), bytes.limit());
+            ObjectInputStream inputStream = new ObjectInputStream(in);
+            return inputStream.readObject();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
         }
-    };
+    }
 
-    private final Encoder encoder = new Encoder() {
+    @Override
+    public byte[] encodeKey(Object key) {
+        return encodeValue(key);
+    }
 
-        @Override
-        public byte[] encode(Object in) throws IOException {
+    @Override
+    public byte[] encodeValue(Object value) {
+        try {
             ByteArrayOutputStream result = new ByteArrayOutputStream();
             ObjectOutputStream outputStream = new ObjectOutputStream(result);
-            outputStream.writeObject(in);
+            outputStream.writeObject(value);
             outputStream.close();
             return result.toByteArray();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
         }
-    };
-
-    @Override
-    public Decoder<Object> getMapValueDecoder() {
-        return getValueDecoder();
-    }
-
-    @Override
-    public Encoder getMapValueEncoder() {
-        return getValueEncoder();
-    }
-
-    @Override
-    public Decoder<Object> getMapKeyDecoder() {
-        return getValueDecoder();
-    }
-
-    @Override
-    public Encoder getMapKeyEncoder() {
-        return getValueEncoder();
-    }
-
-    @Override
-    public Decoder<Object> getValueDecoder() {
-        return decoder;
-    }
-
-    @Override
-    public Encoder getValueEncoder() {
-        return encoder;
     }
 
 }

@@ -15,67 +15,21 @@
  */
 package org.redisson;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentMap;
 
-import org.redisson.api.RedissonReactiveClient;
-import org.redisson.client.codec.Codec;
-import org.redisson.client.protocol.RedisCommands;
-import org.redisson.cluster.ClusterConnectionManager;
-import org.redisson.command.CommandExecutor;
-import org.redisson.command.CommandSyncService;
 import org.redisson.connection.ConnectionManager;
-import org.redisson.connection.ElasticacheConnectionManager;
-import org.redisson.connection.MasterSlaveConnectionManager;
-import org.redisson.connection.SentinelConnectionManager;
-import org.redisson.connection.SingleConnectionManager;
-import org.redisson.core.ClusterNode;
-import org.redisson.core.Node;
-import org.redisson.core.NodesGroup;
-import org.redisson.core.RAtomicDouble;
 import org.redisson.core.RAtomicLong;
-import org.redisson.core.RBatch;
-import org.redisson.core.RBitSet;
-import org.redisson.core.RBlockingDeque;
-import org.redisson.core.RBlockingQueue;
-import org.redisson.core.RBloomFilter;
-import org.redisson.core.RBucket;
-import org.redisson.core.RBuckets;
 import org.redisson.core.RCountDownLatch;
-import org.redisson.core.RDeque;
-import org.redisson.core.RGeo;
-import org.redisson.core.RHyperLogLog;
-import org.redisson.core.RKeys;
-import org.redisson.core.RLexSortedSet;
 import org.redisson.core.RList;
-import org.redisson.core.RListMultimap;
-import org.redisson.core.RListMultimapCache;
 import org.redisson.core.RLock;
 import org.redisson.core.RMap;
-import org.redisson.core.RMapCache;
-import org.redisson.core.RPatternTopic;
 import org.redisson.core.RQueue;
-import org.redisson.core.RReadWriteLock;
-import org.redisson.core.RRemoteService;
-import org.redisson.core.RScoredSortedSet;
-import org.redisson.core.RScript;
-import org.redisson.core.RSemaphore;
 import org.redisson.core.RSet;
-import org.redisson.core.RSetCache;
-import org.redisson.core.RSetMultimap;
-import org.redisson.core.RSetMultimapCache;
-import org.redisson.core.RSortedSet;
 import org.redisson.core.RTopic;
-
-import io.netty.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import org.redisson.misc.ReferenceMap;
+import org.redisson.misc.ReferenceMap.ReferenceType;
+import org.redisson.misc.ReferenceMap.RemoveValueListener;
 
 /**
  * Main infrastructure class allows to get access
@@ -84,10 +38,29 @@ import java.util.concurrent.TimeUnit;
  * @author Nikita Koksharov
  *
  */
-public class Redisson implements RedissonClient {
+public class Redisson {
 
-    private final EvictionScheduler evictionScheduler;
-    private final CommandExecutor commandExecutor;
+    RemoveValueListener listener = new RemoveValueListener() {
+
+        @Override
+        public void onRemove(Object value) {
+            if (value instanceof RedissonObject) {
+                ((RedissonObject)value).close();
+            }
+        }
+
+    };
+
+    private final ConcurrentMap<String, RedissonCountDownLatch> latchesMap = new ReferenceMap<String, RedissonCountDownLatch>(ReferenceType.STRONG, ReferenceType.SOFT, listener);
+    private final ConcurrentMap<String, RedissonTopic> topicsMap = new ReferenceMap<String, RedissonTopic>(ReferenceType.STRONG, ReferenceType.SOFT, listener);
+    private final ConcurrentMap<String, RedissonLock> locksMap = new ReferenceMap<String, RedissonLock>(ReferenceType.STRONG, ReferenceType.SOFT, listener);
+
+    private final ConcurrentMap<String, RedissonAtomicLong> atomicLongsMap = new ReferenceMap<String, RedissonAtomicLong>(ReferenceType.STRONG, ReferenceType.SOFT);
+    private final ConcurrentMap<String, RedissonQueue> queuesMap = new ReferenceMap<String, RedissonQueue>(ReferenceType.STRONG, ReferenceType.SOFT);
+    private final ConcurrentMap<String, RedissonSet> setsMap = new ReferenceMap<String, RedissonSet>(ReferenceType.STRONG, ReferenceType.SOFT);
+    private final ConcurrentMap<String, RedissonList> listsMap = new ReferenceMap<String, RedissonList>(ReferenceType.STRONG, ReferenceType.SOFT);
+    private final ConcurrentMap<String, RedissonMap> mapsMap = new ReferenceMap<String, RedissonMap>(ReferenceType.STRONG, ReferenceType.SOFT);
+
     private final ConnectionManager connectionManager;
     private final Config config;
 
@@ -96,478 +69,203 @@ public class Redisson implements RedissonClient {
     Redisson(Config config) {
         this.config = config;
         Config configCopy = new Config(config);
-        
-        if (configCopy.getMasterSlaveServersConfig() != null) {
-            validate(configCopy.getMasterSlaveServersConfig());
-            connectionManager = new MasterSlaveConnectionManager(configCopy.getMasterSlaveServersConfig(), configCopy);
-        } else if (configCopy.getSingleServerConfig() != null) {
-            validate(configCopy.getSingleServerConfig());
-            connectionManager = new SingleConnectionManager(configCopy.getSingleServerConfig(), configCopy);
-        } else if (configCopy.getSentinelServersConfig() != null) {
-            validate(configCopy.getSentinelServersConfig());
-            connectionManager = new SentinelConnectionManager(configCopy.getSentinelServersConfig(), configCopy);
-        } else if (configCopy.getClusterServersConfig() != null) {
-            validate(configCopy.getClusterServersConfig());
-            connectionManager = new ClusterConnectionManager(configCopy.getClusterServersConfig(), configCopy);
-        } else if (configCopy.getElasticacheServersConfig() != null) {
-            validate(configCopy.getElasticacheServersConfig());
-            connectionManager = new ElasticacheConnectionManager(configCopy.getElasticacheServersConfig(), configCopy);
-        } else {
-            throw new IllegalArgumentException("server(s) address(es) not defined!");
-        }
-        commandExecutor = new CommandSyncService(connectionManager);
-        evictionScheduler = new EvictionScheduler(commandExecutor);
-    }
-
-    private void validate(SingleServerConfig config) {
-        if (config.getConnectionPoolSize() < config.getConnectionMinimumIdleSize()) {
-            throw new IllegalArgumentException("connectionPoolSize can't be lower than connectionMinimumIdleSize");
-        }
-    }
-
-    private void validate(BaseMasterSlaveServersConfig<?> config) {
-        if (config.getSlaveConnectionPoolSize() < config.getSlaveConnectionMinimumIdleSize()) {
-            throw new IllegalArgumentException("slaveConnectionPoolSize can't be lower than slaveConnectionMinimumIdleSize");
-        }
-        if (config.getMasterConnectionPoolSize() < config.getMasterConnectionMinimumIdleSize()) {
-            throw new IllegalArgumentException("masterConnectionPoolSize can't be lower than masterConnectionMinimumIdleSize");
-        }
-        if (config.getSlaveSubscriptionConnectionPoolSize() < config.getSlaveSubscriptionConnectionMinimumIdleSize()) {
-            throw new IllegalArgumentException("slaveSubscriptionConnectionMinimumIdleSize can't be lower than slaveSubscriptionConnectionPoolSize");
-        }
+        connectionManager = new ConnectionManager(configCopy);
     }
 
     /**
-     * Create sync/async Redisson instance with default config
+     * Creates an Redisson instance
      *
      * @return Redisson instance
      */
-    public static RedissonClient create() {
+    public static Redisson create() {
         Config config = new Config();
-        config.useSingleServer().setAddress("127.0.0.1:6379");
-//        config.useMasterSlaveConnection().setMasterAddress("127.0.0.1:6379").addSlaveAddress("127.0.0.1:6389").addSlaveAddress("127.0.0.1:6399");
-//        config.useSentinelConnection().setMasterName("mymaster").addSentinelAddress("127.0.0.1:26389", "127.0.0.1:26379");
-//        config.useClusterServers().addNodeAddress("127.0.0.1:7000");
+        config.addAddress("127.0.0.1:6379");
         return create(config);
     }
 
     /**
-     * Create sync/async Redisson instance with provided config
+     * Creates an Redisson instance with configuration
      *
      * @param config
      * @return Redisson instance
      */
-    public static RedissonClient create(Config config) {
+    public static Redisson create(Config config) {
         return new Redisson(config);
     }
 
     /**
-     * Create reactive Redisson instance with default config
+     * Returns distributed list instance by name.
      *
-     * @return Redisson instance
+     * @param name of the distributed list
+     * @return distributed list
      */
-    public static RedissonReactiveClient createReactive() {
-        Config config = new Config();
-        config.useSingleServer().setAddress("127.0.0.1:6379");
-//        config.useMasterSlaveConnection().setMasterAddress("127.0.0.1:6379").addSlaveAddress("127.0.0.1:6389").addSlaveAddress("127.0.0.1:6399");
-//        config.useSentinelConnection().setMasterName("mymaster").addSentinelAddress("127.0.0.1:26389", "127.0.0.1:26379");
-//        config.useClusterServers().addNodeAddress("127.0.0.1:7000");
-        return createReactive(config);
+    public <V> RList<V> getList(String name) {
+        RedissonList<V> list = listsMap.get(name);
+        if (list == null) {
+            list = new RedissonList<V>(connectionManager, name);
+            RedissonList<V> oldList = listsMap.putIfAbsent(name, list);
+            if (oldList != null) {
+                list = oldList;
+            }
+        }
+
+        return list;
     }
 
     /**
-     * Create reactive Redisson instance with provided config
+     * Returns distributed map instance by name.
      *
-     * @return Redisson instance
+     * @param name of the distributed map
+     * @return distributed map
      */
-    public static RedissonReactiveClient createReactive(Config config) {
-        return new RedissonReactive(config);
-    }
-    
-    @Override
-    public <V> RGeo<V> getGeo(String name) {
-        return new RedissonGeo<V>(commandExecutor, name);
-    }
-    
-    @Override
-    public <V> RGeo<V> getGeo(String name, Codec codec) {
-        return new RedissonGeo<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBucket<V> getBucket(String name) {
-        return new RedissonBucket<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBucket<V> getBucket(String name, Codec codec) {
-        return new RedissonBucket<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public RBuckets getBuckets() {
-        return new RedissonBuckets(this, commandExecutor);
-    }
-    
-    @Override
-    public RBuckets getBuckets(Codec codec) {
-        return new RedissonBuckets(this, codec, commandExecutor);
-    }
-    
-    @Override
-    public <V> List<RBucket<V>> findBuckets(String pattern) {
-        Collection<String> keys = commandExecutor.get(commandExecutor.<List<String>, String>readAllAsync(RedisCommands.KEYS, pattern));
-        List<RBucket<V>> buckets = new ArrayList<RBucket<V>>(keys.size());
-        for (String key : keys) {
-            if(key == null) {
-                continue;
-            }
-            buckets.add(this.<V>getBucket(key));
-        }
-        return buckets;
-    }
-
-    @Override
-    public <V> Map<String, V> loadBucketValues(Collection<String> keys) {
-        return loadBucketValues(keys.toArray(new String[keys.size()]));
-    }
-
-    @Override
-    public <V> Map<String, V> loadBucketValues(String ... keys) {
-        if (keys.length == 0) {
-            return Collections.emptyMap();
-        }
-
-        Future<List<Object>> future = commandExecutor.readAsync(keys[0], RedisCommands.MGET, keys);
-        List<Object> values = commandExecutor.get(future);
-        Map<String, V> result = new HashMap<String, V>(values.size());
-        int index = 0;
-        for (Object value : values) {
-            if(value == null) {
-                index++;
-                continue;
-            }
-            result.put(keys[index], (V)value);
-            index++;
-        }
-        return result;
-    }
-
-    @Override
-    public void saveBuckets(Map<String, ?> buckets) {
-        if (buckets.isEmpty()) {
-            return;
-        }
-
-        List<Object> params = new ArrayList<Object>(buckets.size());
-        for (Entry<String, ?> entry : buckets.entrySet()) {
-            params.add(entry.getKey());
-            try {
-                params.add(config.getCodec().getValueEncoder().encode(entry.getValue()));
-            } catch (IOException e) {
-                throw new IllegalArgumentException(e);
-            }
-        }
-
-        commandExecutor.write(params.get(0).toString(), RedisCommands.MSET, params.toArray());
-    }
-
-    @Override
-    public <V> RHyperLogLog<V> getHyperLogLog(String name) {
-        return new RedissonHyperLogLog<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RHyperLogLog<V> getHyperLogLog(String name, Codec codec) {
-        return new RedissonHyperLogLog<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RList<V> getList(String name) {
-        return new RedissonList<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RList<V> getList(String name, Codec codec) {
-        return new RedissonList<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RListMultimap<K, V> getListMultimap(String name) {
-        return new RedissonListMultimap<K, V>(commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RListMultimap<K, V> getListMultimap(String name, Codec codec) {
-        return new RedissonListMultimap<K, V>(codec, commandExecutor, name);
-    }
-
-    @Override
     public <K, V> RMap<K, V> getMap(String name) {
-        return new RedissonMap<K, V>(commandExecutor, name);
+        RedissonMap<K, V> map = mapsMap.get(name);
+        if (map == null) {
+            map = new RedissonMap<K, V>(connectionManager, name);
+            RedissonMap<K, V> oldMap = mapsMap.putIfAbsent(name, map);
+            if (oldMap != null) {
+                map = oldMap;
+            }
+        }
+
+        return map;
     }
 
-    @Override
-    public <K, V> RSetMultimap<K, V> getSetMultimap(String name) {
-        return new RedissonSetMultimap<K, V>(commandExecutor, name);
-    }
-    
-    @Override
-    public <K, V> RSetMultimapCache<K, V> getSetMultimapCache(String name) {
-        return new RedissonSetMultimapCache<K, V>(evictionScheduler, commandExecutor, name);
-    }
-    
-    @Override
-    public <K, V> RSetMultimapCache<K, V> getSetMultimapCache(String name, Codec codec) {
-        return new RedissonSetMultimapCache<K, V>(evictionScheduler, codec, commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RListMultimapCache<K, V> getListMultimapCache(String name) {
-        return new RedissonListMultimapCache<K, V>(evictionScheduler, commandExecutor, name);
-    }
-    
-    @Override
-    public <K, V> RListMultimapCache<K, V> getListMultimapCache(String name, Codec codec) {
-        return new RedissonListMultimapCache<K, V>(evictionScheduler, codec, commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RSetMultimap<K, V> getSetMultimap(String name, Codec codec) {
-        return new RedissonSetMultimap<K, V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RSetCache<V> getSetCache(String name) {
-        return new RedissonSetCache<V>(evictionScheduler, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RSetCache<V> getSetCache(String name, Codec codec) {
-        return new RedissonSetCache<V>(codec, evictionScheduler, commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RMapCache<K, V> getMapCache(String name) {
-        return new RedissonMapCache<K, V>(evictionScheduler, commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RMapCache<K, V> getMapCache(String name, Codec codec) {
-        return new RedissonMapCache<K, V>(codec, evictionScheduler, commandExecutor, name);
-    }
-
-    @Override
-    public <K, V> RMap<K, V> getMap(String name, Codec codec) {
-        return new RedissonMap<K, V>(codec, commandExecutor, name);
-    }
-
-    @Override
+    /**
+     * Returns distributed lock instance by name.
+     *
+     * @param name of the distributed lock
+     * @return distributed lock
+     */
     public RLock getLock(String name) {
-        return new RedissonLock(commandExecutor, name, id);
+        RedissonLock lock = locksMap.get(name);
+        if (lock == null) {
+            lock = new RedissonLock(connectionManager, name, id);
+            RedissonLock oldLock = locksMap.putIfAbsent(name, lock);
+            if (oldLock != null) {
+                lock = oldLock;
+            }
+        }
+
+        lock.subscribe();
+        return lock;
     }
 
-    @Override
-    public RLock getFairLock(String name) {
-        return new RedissonFairLock(commandExecutor, name, id);
-    }
-    
-    @Override
-    public RReadWriteLock getReadWriteLock(String name) {
-        return new RedissonReadWriteLock(commandExecutor, name, id);
-    }
-
-    @Override
+    /**
+     * Returns distributed set instance by name.
+     *
+     * @param name of the distributed set
+     * @return distributed set
+     */
     public <V> RSet<V> getSet(String name) {
-        return new RedissonSet<V>(commandExecutor, name);
+        RedissonSet<V> set = setsMap.get(name);
+        if (set == null) {
+            set = new RedissonSet<V>(connectionManager, name);
+            RedissonSet<V> oldSet = setsMap.putIfAbsent(name, set);
+            if (oldSet != null) {
+                set = oldSet;
+            }
+        }
+
+        return set;
     }
 
-    @Override
-    public <V> RSet<V> getSet(String name, Codec codec) {
-        return new RedissonSet<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public RScript getScript() {
-        return new RedissonScript(commandExecutor);
-    }
-
-    public RRemoteService getRemoteSerivce() {
-        return new RedissonRemoteService(this);
-    }
-
-    @Override
-    public RRemoteService getRemoteSerivce(String name) {
-        return new RedissonRemoteService(this, name);
-    }
-
-    @Override
-    public <V> RSortedSet<V> getSortedSet(String name) {
-        return new RedissonSortedSet<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RSortedSet<V> getSortedSet(String name, Codec codec) {
-        return new RedissonSortedSet<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RScoredSortedSet<V> getScoredSortedSet(String name) {
-        return new RedissonScoredSortedSet<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RScoredSortedSet<V> getScoredSortedSet(String name, Codec codec) {
-        return new RedissonScoredSortedSet<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public RLexSortedSet getLexSortedSet(String name) {
-        return new RedissonLexSortedSet(commandExecutor, name);
-    }
-
-    @Override
+    /**
+     * Returns distributed topic instance by name.
+     *
+     * @param name of the distributed topic
+     * @return distributed topic
+     */
     public <M> RTopic<M> getTopic(String name) {
-        return new RedissonTopic<M>(commandExecutor, name);
+        RedissonTopic<M> topic = topicsMap.get(name);
+        if (topic == null) {
+            topic = new RedissonTopic<M>(connectionManager, name);
+            RedissonTopic<M> oldTopic = topicsMap.putIfAbsent(name, topic);
+            if (oldTopic != null) {
+                topic = oldTopic;
+            }
+        }
+
+        topic.subscribe();
+        return topic;
+
     }
 
-    @Override
-    public <M> RTopic<M> getTopic(String name, Codec codec) {
-        return new RedissonTopic<M>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <M> RPatternTopic<M> getPatternTopic(String pattern) {
-        return new RedissonPatternTopic<M>(commandExecutor, pattern);
-    }
-
-    @Override
-    public <M> RPatternTopic<M> getPatternTopic(String pattern, Codec codec) {
-        return new RedissonPatternTopic<M>(codec, commandExecutor, pattern);
-    }
-
-    @Override
+    /**
+     * Returns distributed queue instance by name.
+     *
+     * @param name of the distributed queue
+     * @return distributed queue
+     */
     public <V> RQueue<V> getQueue(String name) {
-        return new RedissonQueue<V>(commandExecutor, name);
+        RedissonQueue<V> queue = queuesMap.get(name);
+        if (queue == null) {
+            queue = new RedissonQueue<V>(connectionManager, name);
+            RedissonQueue<V> oldQueue = queuesMap.putIfAbsent(name, queue);
+            if (oldQueue != null) {
+                queue = oldQueue;
+            }
+        }
+
+        return queue;
     }
 
-    @Override
-    public <V> RQueue<V> getQueue(String name, Codec codec) {
-        return new RedissonQueue<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBlockingQueue<V> getBlockingQueue(String name) {
-        return new RedissonBlockingQueue<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBlockingQueue<V> getBlockingQueue(String name, Codec codec) {
-        return new RedissonBlockingQueue<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RDeque<V> getDeque(String name) {
-        return new RedissonDeque<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RDeque<V> getDeque(String name, Codec codec) {
-        return new RedissonDeque<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBlockingDeque<V> getBlockingDeque(String name) {
-        return new RedissonBlockingDeque<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBlockingDeque<V> getBlockingDeque(String name, Codec codec) {
-        return new RedissonBlockingDeque<V>(codec, commandExecutor, name);
-    };
-
-    @Override
+    /**
+     * Returns distributed "atomic long" instance by name.
+     *
+     * @param name of the distributed "atomic long"
+     * @return distributed "atomic long"
+     */
     public RAtomicLong getAtomicLong(String name) {
-        return new RedissonAtomicLong(commandExecutor, name);
+        RedissonAtomicLong atomicLong = atomicLongsMap.get(name);
+        if (atomicLong == null) {
+            atomicLong = new RedissonAtomicLong(connectionManager, name);
+            RedissonAtomicLong oldAtomicLong = atomicLongsMap.putIfAbsent(name, atomicLong);
+            if (oldAtomicLong != null) {
+                atomicLong = oldAtomicLong;
+            }
+        }
+
+        return atomicLong;
+
     }
 
-    @Override
-    public RAtomicDouble getAtomicDouble(String name) {
-        return new RedissonAtomicDouble(commandExecutor, name);
-    }
-
-    @Override
+    /**
+     * Returns distributed "count down latch" instance by name.
+     *
+     * @param name of the distributed "count down latch"
+     * @return distributed "count down latch"
+     */
     public RCountDownLatch getCountDownLatch(String name) {
-        return new RedissonCountDownLatch(commandExecutor, name, id);
+        RedissonCountDownLatch latch = latchesMap.get(name);
+        if (latch == null) {
+            latch = new RedissonCountDownLatch(connectionManager, name);
+            RedissonCountDownLatch oldLatch = latchesMap.putIfAbsent(name, latch);
+            if (oldLatch != null) {
+                latch = oldLatch;
+            }
+        }
+
+        latch.subscribe();
+        return latch;
     }
 
-    @Override
-    public RBitSet getBitSet(String name) {
-        return new RedissonBitSet(commandExecutor, name);
-    }
-
-    @Override
-    public RSemaphore getSemaphore(String name) {
-        return new RedissonSemaphore(commandExecutor, name, id);
-    }
-
-    @Override
-    public <V> RBloomFilter<V> getBloomFilter(String name) {
-        return new RedissonBloomFilter<V>(commandExecutor, name);
-    }
-
-    @Override
-    public <V> RBloomFilter<V> getBloomFilter(String name, Codec codec) {
-        return new RedissonBloomFilter<V>(codec, commandExecutor, name);
-    }
-
-    @Override
-    public RKeys getKeys() {
-        return new RedissonKeys(commandExecutor);
-    }
-
-    @Override
-    public RBatch createBatch() {
-        return new RedissonBatch(evictionScheduler, connectionManager);
-    }
-
-    @Override
+    /**
+     * Shuts down Redisson instance <b>NOT</b> Redis server
+     */
     public void shutdown() {
         connectionManager.shutdown();
     }
-    
-    
-    @Override
-    public void shutdown(long quietPeriod, long timeout, TimeUnit unit) {
-        connectionManager.shutdown(quietPeriod, timeout, unit);
-    }
 
-    @Override
+    /**
+     * Allows to get configuration provided
+     * during Redisson instance creation. Further changes on
+     * this object not affect Redisson instance.
+     *
+     * @return Config object
+     */
     public Config getConfig() {
         return config;
-    }
-
-    @Override
-    public NodesGroup<Node> getNodesGroup() {
-        return new RedisNodes<Node>(connectionManager);
-    }
-
-    @Override
-    public NodesGroup<ClusterNode> getClusterNodesGroup() {
-        if (!config.isClusterConfig()) {
-            throw new IllegalStateException("Redisson is not in cluster mode!");
-        }
-        return new RedisNodes<ClusterNode>(connectionManager);
-    }
-
-    @Override
-    public boolean isShutdown() {
-        return connectionManager.isShutdown();
-    }
-
-    @Override
-    public boolean isShuttingDown() {
-        return connectionManager.isShuttingDown();
     }
 
 }
