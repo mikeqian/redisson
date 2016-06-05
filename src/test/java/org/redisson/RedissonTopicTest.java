@@ -1,10 +1,9 @@
-package temp;
+package org.redisson;
 
 import java.util.concurrent.CountDownLatch;
 
 import org.junit.Assert;
 import org.junit.Test;
-import org.redisson.Redisson;
 import org.redisson.core.MessageListener;
 import org.redisson.core.RTopic;
 

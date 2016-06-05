@@ -17,7 +17,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
  * A synchronous thread-safe connection to a redis server. Multiple threads may
  * share one {@link RedisConnection} provided they avoid blocking and transactional
  * operations such as {@link #blpop} and {@link #multi()}/{@link #exec}.
- * <p>
+ *
  * A {@link ConnectionWatchdog} monitors each connection and reconnects
  * automatically until {@link #close} is called. All pending commands will be
  * (re)sent after successful reconnection.
@@ -32,23 +32,23 @@ public class RedisConnection<K, V> {
     /**
      * Initialize a new connection.
      *
-     * @param c Underlying async connection.
+     * @param c  Underlying async connection.
      */
     public RedisConnection(RedisAsyncConnection<K, V> c) {
-        this.c = c;
+        this.c       = c;
         this.timeout = c.timeout;
-        this.unit = c.unit;
+        this.unit    = c.unit;
     }
 
     /**
      * Set the command timeout for this connection.
      *
-     * @param timeout Command timeout.
-     * @param unit    Unit of time for the timeout.
+     * @param timeout   Command timeout.
+     * @param unit      Unit of time for the timeout.
      */
     public void setTimeout(long timeout, TimeUnit unit) {
         this.timeout = timeout;
-        this.unit = unit;
+        this.unit    = unit;
         c.setTimeout(timeout, unit);
     }
 
@@ -87,7 +87,6 @@ public class RedisConnection<K, V> {
     public Long bitopOr(K destination, K... keys) {
         return await(c.bitopOr(destination, keys));
     }
-
     public Long bitopXor(K destination, K... keys) {
         return await(c.bitopXor(destination, keys));
     }
@@ -171,10 +170,12 @@ public class RedisConnection<K, V> {
      * Eval the supplied script, which must result in the requested
      * {@link ScriptOutputType type}.
      *
-     * @param script Lua script to evaluate.
-     * @param type   Script output type.
-     * @param keys   Redis keys to pass to script.
-     * @param <T>    Expected return type.
+     * @param script    Lua script to evaluate.
+     * @param type      Script output type.
+     * @param keys      Redis keys to pass to script.
+     *
+     * @param <T>       Expected return type.
+     *
      * @return The result of evaluating the script.
      */
     @SuppressWarnings("unchecked")
@@ -191,10 +192,12 @@ public class RedisConnection<K, V> {
      * Eval a pre-loaded script identified by its SHA-1 digest, which must result
      * in the requested {@link ScriptOutputType type}.
      *
-     * @param digest Lowercase hex string of script's SHA-1 digest.
-     * @param type   Script output type.
-     * @param keys   Redis keys to pass to script.
-     * @param <T>    Expected return type.
+     * @param digest    Lowercase hex string of script's SHA-1 digest.
+     * @param type      Script output type.
+     * @param keys      Redis keys to pass to script.
+     *
+     * @param <T>       Expected return type.
+     *
      * @return The result of evaluating the script.
      */
     @SuppressWarnings("unchecked")
@@ -227,11 +230,11 @@ public class RedisConnection<K, V> {
         return await(c.exec());
     }
 
-    public String flushall() throws Exception {
+    public String flushall() {
         return await(c.flushall());
     }
 
-    public String flushdb() throws Exception {
+    public String flushdb() {
         return await(c.flushdb());
     }
 
@@ -275,7 +278,7 @@ public class RedisConnection<K, V> {
         return await(c.hgetall(key));
     }
 
-    public List<K> hkeys(K key) {
+    public Set<K> hkeys(K key) {
         return await(c.hkeys(key));
     }
 
@@ -453,7 +456,7 @@ public class RedisConnection<K, V> {
     }
 
     public String restore(K key, long ttl, byte[] value) {
-        return await(c.restore(key, ttl, value));
+        return await(c.restore(key,  ttl, value));
     }
 
     public V rpop(K key) {
@@ -803,7 +806,8 @@ public class RedisConnection<K, V> {
     /**
      * Generate SHA-1 digest for the supplied script.
      *
-     * @param script Lua script.
+     * @param script    Lua script.
+     *
      * @return Script digest as a lowercase hex string.
      */
     public String digest(V script) {
@@ -816,6 +820,7 @@ public class RedisConnection<K, V> {
         return c.await(cmd, timeout, unit);
     }
 
+    @SuppressWarnings("unchecked")
     private <T> T await(Future<T> future) {
         Command<K, V, T> cmd = (Command<K, V, T>) future;
         if (c.multi != null && cmd.type != MULTI) return null;

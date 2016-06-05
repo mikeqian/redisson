@@ -7,13 +7,34 @@ import org.hamcrest.MatcherAssert;
 import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.Test;
-import org.redisson.Redisson;
 
 public class RedissonSetTest extends BaseTest {
 
-    /**
-     * 使用SADD命令
-     */
+    @Test
+    public void testLong() {
+        Redisson redisson = Redisson.create();
+        Set<Long> set = redisson.getSet("set");
+        set.add(1L);
+        set.add(2L);
+
+        Assert.assertThat(set, Matchers.containsInAnyOrder(1L, 2L));
+        clear(set, redisson);
+    }
+
+    @Test
+    public void testRetainAll() {
+        Redisson redisson = Redisson.create();
+        Set<Integer> set = redisson.getSet("set");
+        for (int i = 0; i < 200; i++) {
+            set.add(i);
+        }
+
+        Assert.assertTrue(set.retainAll(Arrays.asList(1, 2)));
+        Assert.assertEquals(2, set.size());
+
+        clear(set, redisson);
+    }
+
     @Test
     public void testContainsAll() {
         Redisson redisson = Redisson.create();
@@ -28,9 +49,6 @@ public class RedissonSetTest extends BaseTest {
         clear(set, redisson);
     }
 
-    /**
-     * 使用SMEMBERS命令，返回所有
-     */
     @Test
     public void testToArray() {
         Redisson redisson = Redisson.create();
@@ -49,9 +67,6 @@ public class RedissonSetTest extends BaseTest {
         clear(set, redisson);
     }
 
-    /**
-     * SISMEMBER
-     */
     @Test
     public void testContains() {
         Redisson redisson = Redisson.create();
@@ -70,9 +85,6 @@ public class RedissonSetTest extends BaseTest {
         clear(set, redisson);
     }
 
-    /**
-     * set 是无重复的集合
-     */
     @Test
     public void testDuplicates() {
         Redisson redisson = Redisson.create();
@@ -89,9 +101,6 @@ public class RedissonSetTest extends BaseTest {
         clear(set, redisson);
     }
 
-    /**
-     * scard 命令获得size
-     */
     @Test
     public void testSize() {
         Redisson redisson = Redisson.create();

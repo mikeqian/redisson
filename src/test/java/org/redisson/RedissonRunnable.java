@@ -1,6 +1,4 @@
-package temp;
-
-import org.redisson.Redisson;
+package org.redisson;
 
 public interface RedissonRunnable {
 

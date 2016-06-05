@@ -6,13 +6,9 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.junit.Assert;
 import org.junit.Test;
-import org.redisson.Redisson;
 
 public class RedissonMapTest extends BaseTest {
 
-    /**
-     * 重写hashcode和equals
-     */
     public static class SimpleKey implements Serializable {
 
         private String key;
@@ -115,9 +111,40 @@ public class RedissonMapTest extends BaseTest {
 
     }
 
-    /**
-     * Map可空值
-     */
+    @Test
+    public void testInteger() {
+        Redisson redisson = Redisson.create();
+        Map<Integer, Integer> map = redisson.getMap("test_int");
+        map.put(1, 2);
+        map.put(3, 4);
+
+        Assert.assertEquals(2, map.size());
+
+        Integer val = map.get(1);
+        Assert.assertEquals(2, val.intValue());
+        Integer val2 = map.get(3);
+        Assert.assertEquals(4, val2.intValue());
+
+        clear(map, redisson);
+    }
+
+    @Test
+    public void testLong() {
+        Redisson redisson = Redisson.create();
+        Map<Long, Long> map = redisson.getMap("test_long");
+        map.put(1L, 2L);
+        map.put(3L, 4L);
+
+        Assert.assertEquals(2, map.size());
+
+        Long val = map.get(1L);
+        Assert.assertEquals(2L, val.longValue());
+        Long val2 = map.get(3L);
+        Assert.assertEquals(4L, val2.longValue());
+
+        clear(map, redisson);
+    }
+
     @Test
     public void testNull() {
         Redisson redisson = Redisson.create();
@@ -168,9 +195,6 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
-    /**
-     * hkeys命令
-     */
     @Test
     public void testKeySet() {
         Redisson redisson = Redisson.create();
@@ -185,9 +209,6 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
-    /**
-     * hvals 命令
-     */
     @Test
     public void testContainsValue() {
         Redisson redisson = Redisson.create();
@@ -203,9 +224,6 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
-    /**
-     * hexists
-     */
     @Test
     public void testContainsKey() {
         Redisson redisson = Redisson.create();
@@ -340,9 +358,6 @@ public class RedissonMapTest extends BaseTest {
         clear(map, redisson);
     }
 
-    /**
-     * hlen
-     */
     @Test
     public void testSize() {
         Redisson redisson = Redisson.create();

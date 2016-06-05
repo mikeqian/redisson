@@ -24,6 +24,6 @@ import java.util.Set;
  *
  * @param <V> value
  */
-public interface RSet<V> extends Set<V>, RObject {
+public interface RSet<V> extends Set<V>, RExpirable {
 
 }

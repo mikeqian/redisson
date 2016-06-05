@@ -23,6 +23,6 @@ public class ValueSetOutput<K, V> extends CommandOutput<K, V, Set<V>> {
 
     @Override
     public void set(ByteBuffer bytes) {
-        output.add(bytes == null ? null : codec.decodeValue(bytes));
+        output.add(bytes == null ? null : codec.decodeMapValue(bytes));
     }
 }

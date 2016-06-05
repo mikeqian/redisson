@@ -1,4 +1,4 @@
-package temp;
+package org.redisson;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -6,7 +6,6 @@ import java.util.concurrent.TimeUnit;
 
 import org.junit.Assert;
 import org.junit.Test;
-import org.redisson.Redisson;
 import org.redisson.core.RCountDownLatch;
 
 public class RedissonCountDownLatchTest {

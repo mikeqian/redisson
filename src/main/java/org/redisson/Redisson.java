@@ -21,15 +21,19 @@ import java.util.concurrent.ConcurrentMap;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RAtomicLong;
 import org.redisson.core.RCountDownLatch;
+import org.redisson.core.RDeque;
 import org.redisson.core.RList;
 import org.redisson.core.RLock;
 import org.redisson.core.RMap;
 import org.redisson.core.RQueue;
 import org.redisson.core.RSet;
+import org.redisson.core.RSortedSet;
 import org.redisson.core.RTopic;
 import org.redisson.misc.ReferenceMap;
 import org.redisson.misc.ReferenceMap.ReferenceType;
 import org.redisson.misc.ReferenceMap.RemoveValueListener;
+
+import com.lambdaworks.redis.RedisConnection;
 
 /**
  * Main infrastructure class allows to get access
@@ -40,7 +44,7 @@ import org.redisson.misc.ReferenceMap.RemoveValueListener;
  */
 public class Redisson {
 
-    RemoveValueListener listener = new RemoveValueListener() {
+    private final RemoveValueListener listener = new RemoveValueListener() {
 
         @Override
         public void onRemove(Object value) {
@@ -57,7 +61,9 @@ public class Redisson {
 
     private final ConcurrentMap<String, RedissonAtomicLong> atomicLongsMap = new ReferenceMap<String, RedissonAtomicLong>(ReferenceType.STRONG, ReferenceType.SOFT);
     private final ConcurrentMap<String, RedissonQueue> queuesMap = new ReferenceMap<String, RedissonQueue>(ReferenceType.STRONG, ReferenceType.SOFT);
+    private final ConcurrentMap<String, RedissonDeque> dequeMap = new ReferenceMap<String, RedissonDeque>(ReferenceType.STRONG, ReferenceType.SOFT);
     private final ConcurrentMap<String, RedissonSet> setsMap = new ReferenceMap<String, RedissonSet>(ReferenceType.STRONG, ReferenceType.SOFT);
+    private final ConcurrentMap<String, RedissonSortedSet> sortedSetMap = new ReferenceMap<String, RedissonSortedSet>(ReferenceType.STRONG, ReferenceType.SOFT);
     private final ConcurrentMap<String, RedissonList> listsMap = new ReferenceMap<String, RedissonList>(ReferenceType.STRONG, ReferenceType.SOFT);
     private final ConcurrentMap<String, RedissonMap> mapsMap = new ReferenceMap<String, RedissonMap>(ReferenceType.STRONG, ReferenceType.SOFT);
 
@@ -171,6 +177,25 @@ public class Redisson {
     }
 
     /**
+     * Returns distributed sorted set instance by name.
+     *
+     * @param name of the distributed set
+     * @return distributed set
+     */
+    public <V> RSortedSet<V> getSortedSet(String name) {
+        RedissonSortedSet<V> set = sortedSetMap.get(name);
+        if (set == null) {
+            set = new RedissonSortedSet<V>(connectionManager, name);
+            RedissonSortedSet<V> oldSet = sortedSetMap.putIfAbsent(name, set);
+            if (oldSet != null) {
+                set = oldSet;
+            }
+        }
+
+        return set;
+    }
+
+    /**
      * Returns distributed topic instance by name.
      *
      * @param name of the distributed topic
@@ -211,6 +236,25 @@ public class Redisson {
     }
 
     /**
+     * Returns distributed deque instance by name.
+     *
+     * @param name of the distributed queue
+     * @return distributed queue
+     */
+    public <V> RDeque<V> getDeque(String name) {
+        RedissonDeque<V> queue = dequeMap.get(name);
+        if (queue == null) {
+            queue = new RedissonDeque<V>(connectionManager, name);
+            RedissonDeque<V> oldQueue = dequeMap.putIfAbsent(name, queue);
+            if (oldQueue != null) {
+                queue = oldQueue;
+            }
+        }
+
+        return queue;
+    }
+
+    /**
      * Returns distributed "atomic long" instance by name.
      *
      * @param name of the distributed "atomic long"
@@ -226,6 +270,7 @@ public class Redisson {
             }
         }
 
+        atomicLong.init();
         return atomicLong;
 
     }
@@ -266,6 +311,15 @@ public class Redisson {
      */
     public Config getConfig() {
         return config;
+    }
+
+    public void flushdb() {
+        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
+        try {
+            connection.flushdb();
+        } finally {
+            connectionManager.release(connection);
+        }
     }
 
 }

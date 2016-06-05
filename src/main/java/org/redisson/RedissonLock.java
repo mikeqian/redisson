@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 
 import org.redisson.connection.ConnectionManager;
-import org.redisson.connection.ConnectionManager.PubSubEntry;
+import org.redisson.connection.PubSubConnectionEntry;
 import org.redisson.core.RLock;
 
 import com.lambdaworks.redis.RedisConnection;
@@ -105,7 +105,6 @@ public class RedissonLock extends RedissonObject implements RLock {
     private final ConnectionManager connectionManager;
 
     private final UUID id;
-    private final String groupName = "redisson_lock_";
 
     private static final Integer unlockMessage = 0;
 
@@ -114,7 +113,7 @@ public class RedissonLock extends RedissonObject implements RLock {
 
     private final Semaphore msg = new Semaphore(1);
 
-    private PubSubEntry pubSubEntry;
+    private PubSubConnectionEntry pubSubEntry;
 
     RedissonLock(ConnectionManager connectionManager, String name, UUID id) {
         super(name);
@@ -165,11 +164,11 @@ public class RedissonLock extends RedissonObject implements RLock {
     }
 
     private String getKeyName() {
-        return groupName + getName();
+        return "redisson__lock__" + getName();
     }
 
     private String getChannelName() {
-        return groupName + getName();
+        return "redisson__lock__channel__" + getName();
     }
 
     @Override
@@ -185,7 +184,7 @@ public class RedissonLock extends RedissonObject implements RLock {
         LockValue currentLock = new LockValue(id, Thread.currentThread().getId());
         currentLock.incCounter();
 
-        RedisConnection<Object, Object> connection = connectionManager.connection();
+        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
         try {
             Boolean res = connection.setnx(getKeyName(), currentLock);
             if (!res) {
@@ -222,7 +221,7 @@ public class RedissonLock extends RedissonObject implements RLock {
     public void unlock() {
         LockValue currentLock = new LockValue(id, Thread.currentThread().getId());
 
-        RedisConnection<Object, Object> connection = connectionManager.connection();
+        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
         try {
             LockValue lock = (LockValue) connection.get(getKeyName());
             if (lock != null && lock.equals(currentLock)) {
@@ -269,7 +268,7 @@ public class RedissonLock extends RedissonObject implements RLock {
 
     @Override
     public void forceUnlock() {
-        RedisConnection<Object, Object> connection = connectionManager.connection();
+        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
         try {
             while (true) {
                 LockValue lock = (LockValue) connection.get(getKeyName());
@@ -284,7 +283,7 @@ public class RedissonLock extends RedissonObject implements RLock {
 
     @Override
     public boolean isLocked() {
-        RedisConnection<Object, Object> connection = connectionManager.connection();
+        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
         try {
             LockValue lock = (LockValue) connection.get(getKeyName());
             return lock != null;
@@ -297,7 +296,7 @@ public class RedissonLock extends RedissonObject implements RLock {
     public boolean isHeldByCurrentThread() {
         LockValue currentLock = new LockValue(id, Thread.currentThread().getId());
 
-        RedisConnection<Object, Object> connection = connectionManager.connection();
+        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
         try {
             LockValue lock = (LockValue) connection.get(getKeyName());
             return lock != null && lock.equals(currentLock);
@@ -310,7 +309,7 @@ public class RedissonLock extends RedissonObject implements RLock {
     public int getHoldCount() {
         LockValue currentLock = new LockValue(id, Thread.currentThread().getId());
 
-        RedisConnection<Object, Object> connection = connectionManager.connection();
+        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
         try {
             LockValue lock = (LockValue) connection.get(getKeyName());
             if (lock != null && lock.equals(currentLock)) {
