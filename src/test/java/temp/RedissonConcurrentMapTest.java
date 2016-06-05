@@ -1,4 +1,4 @@
-package org.redisson;
+package temp;
 
 import java.security.SecureRandom;
 import java.util.Map;
@@ -6,6 +6,8 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.junit.Assert;
 import org.junit.Test;
+import org.redisson.BaseConcurrentTest;
+import org.redisson.Redisson;
 
 public class RedissonConcurrentMapTest extends BaseConcurrentTest {
 

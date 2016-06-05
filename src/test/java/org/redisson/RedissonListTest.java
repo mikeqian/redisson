@@ -10,9 +10,15 @@ import java.util.ListIterator;
 import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.Test;
+import org.redisson.Redisson;
 
 public class RedissonListTest extends BaseTest {
 
+    /**
+     * 迭代设置值之前，必须先获得一个index
+     * 迭代器每次都是new出的一个对象
+     * 有个修改次数的变量，来快速失败
+     */
     @Test(expected = IllegalStateException.class)
     public void testListIteratorSetListFail() {
         List<Integer> list = new ArrayList<Integer>();
@@ -483,7 +489,7 @@ public class RedissonListTest extends BaseTest {
 
         Assert.assertThat(list, Matchers.contains(1, 2, 7, 8, 9, 3, 4, 5));
 
-        list.addAll(list.size()-1, Arrays.asList(9, 1, 9));
+        list.addAll(list.size() - 1, Arrays.asList(9, 1, 9));
 
         Assert.assertThat(list, Matchers.contains(1, 2, 7, 8, 9, 3, 4, 9, 1, 9, 5));
 
@@ -503,9 +509,9 @@ public class RedissonListTest extends BaseTest {
         list.add(4);
         list.add(5);
 
-        list.addAll(2, Arrays.asList(7,8,9));
+        list.addAll(2, Arrays.asList(7, 8, 9));
 
-        list.addAll(list.size()-1, Arrays.asList(9, 1, 9));
+        list.addAll(list.size() - 1, Arrays.asList(9, 1, 9));
 
         Assert.assertThat(list, Matchers.contains(1, 2, 7, 8, 9, 3, 4, 9, 1, 9, 5));
 
@@ -525,7 +531,7 @@ public class RedissonListTest extends BaseTest {
         list.add(4);
         list.add(5);
 
-        list.addAll(Arrays.asList(7,8,9));
+        list.addAll(Arrays.asList(7, 8, 9));
 
         list.addAll(Arrays.asList(9, 1, 9));
 
@@ -558,10 +564,10 @@ public class RedissonListTest extends BaseTest {
         list.add("5");
         list.add("3");
 
-        Assert.assertArrayEquals(list.toArray(), new Object[] {"1", "4", "2", "5", "3"});
+        Assert.assertArrayEquals(list.toArray(), new Object[]{"1", "4", "2", "5", "3"});
 
         String[] strs = list.toArray(new String[0]);
-        Assert.assertArrayEquals(strs, new String[] {"1", "4", "2", "5", "3"});
+        Assert.assertArrayEquals(strs, new String[]{"1", "4", "2", "5", "3"});
 
         clear(list, redisson);
     }
@@ -577,7 +583,7 @@ public class RedissonListTest extends BaseTest {
         list.add("5");
         list.add("3");
 
-        for (Iterator<String> iterator = list.iterator(); iterator.hasNext();) {
+        for (Iterator<String> iterator = list.iterator(); iterator.hasNext(); ) {
             String value = iterator.next();
             if (value.equals("2")) {
                 iterator.remove();
@@ -587,7 +593,7 @@ public class RedissonListTest extends BaseTest {
         Assert.assertThat(list, Matchers.contains("1", "4", "5", "3"));
 
         int iteration = 0;
-        for (Iterator<String> iterator = list.iterator(); iterator.hasNext();) {
+        for (Iterator<String> iterator = list.iterator(); iterator.hasNext(); ) {
             iterator.next();
             iterator.remove();
             iteration++;
@@ -620,7 +626,7 @@ public class RedissonListTest extends BaseTest {
 
     private void checkIterator(List<String> list) {
         int iteration = 0;
-        for (Iterator<String> iterator = list.iterator(); iterator.hasNext();) {
+        for (Iterator<String> iterator = list.iterator(); iterator.hasNext(); ) {
             String value = iterator.next();
             String val = list.get(iteration);
             Assert.assertEquals(val, value);
@@ -648,6 +654,9 @@ public class RedissonListTest extends BaseTest {
         clear(list, redisson);
     }
 
+    /**
+     * 通过判断idex>0 && index<size
+     */
     @Test(expected = IndexOutOfBoundsException.class)
     public void testGetFail2() {
         Redisson redisson = Redisson.create();
@@ -656,14 +665,9 @@ public class RedissonListTest extends BaseTest {
         list.get(0);
     }
 
-    @Test(expected = IndexOutOfBoundsException.class)
-    public void testGetFail() {
-        Redisson redisson = Redisson.create();
-        List<String> list = redisson.getList("list");
-
-        list.get(0);
-    }
-
+    /**
+     * add和get测试
+     */
     @Test
     public void testAddGet() {
         Redisson redisson = Redisson.create();
@@ -683,6 +687,9 @@ public class RedissonListTest extends BaseTest {
         clear(list, redisson);
     }
 
+    /**
+     * RPush命令，可以重复
+     */
     @Test
     public void testDuplicates() {
         Redisson redisson = Redisson.create();

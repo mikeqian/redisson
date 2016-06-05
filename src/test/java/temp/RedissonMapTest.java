@@ -1,4 +1,4 @@
-package org.redisson;
+package temp;
 
 import java.io.Serializable;
 import java.util.Map;
@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.junit.Assert;
 import org.junit.Test;
+import org.redisson.Redisson;
 
 public class RedissonMapTest extends BaseTest {
 

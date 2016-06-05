@@ -1,4 +1,4 @@
-package org.redisson;
+package temp;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -8,6 +8,8 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.redisson.BaseConcurrentTest;
+import org.redisson.Redisson;
 import org.redisson.core.RLock;
 
 public class RedissonLockTest extends BaseConcurrentTest {

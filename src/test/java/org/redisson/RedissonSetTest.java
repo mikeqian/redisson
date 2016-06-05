@@ -7,6 +7,7 @@ import org.hamcrest.MatcherAssert;
 import org.hamcrest.Matchers;
 import org.junit.Assert;
 import org.junit.Test;
+import org.redisson.Redisson;
 
 public class RedissonSetTest extends BaseTest {
 

@@ -4,6 +4,7 @@ import java.util.Collection;
 import java.util.Map;
 
 import org.junit.Assert;
+import org.redisson.Redisson;
 
 public abstract class BaseTest {
 
