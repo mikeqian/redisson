@@ -12,9 +12,8 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.group.ChannelGroup;
 import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.util.HashedWheelTimer;
 import io.netty.util.concurrent.GlobalEventExecutor;
 
 import java.net.InetSocketAddress;
@@ -38,20 +37,20 @@ import com.lambdaworks.redis.pubsub.RedisPubSubConnection;
  * @author Will Glozer
  */
 public class RedisClient {
-    private EventLoopGroup group;
+
     private Bootstrap bootstrap;
-    private HashedWheelTimer timer;
     private ChannelGroup channels;
     private long timeout;
     private TimeUnit unit;
+    private InetSocketAddress addr;
 
     /**
      * Create a new client that connects to the supplied host on the default port.
      *
      * @param host    Server hostname.
      */
-    public RedisClient(String host) {
-        this(host, 6379);
+    public RedisClient(EventLoopGroup group, String host) {
+        this(group, host, 6379, 60000);
     }
 
     /**
@@ -62,17 +61,19 @@ public class RedisClient {
      * @param host    Server hostname.
      * @param port    Server port.
      */
-    public RedisClient(String host, int port) {
-        InetSocketAddress addr = new InetSocketAddress(host, port);
+    public RedisClient(EventLoopGroup group, String host, int port, int timeout) {
+        this(group, NioSocketChannel.class, host, port, timeout);
+    }
 
-        group = new NioEventLoopGroup();
-        bootstrap = new Bootstrap().channel(NioSocketChannel.class).group(group).remoteAddress(addr);
+    public RedisClient(EventLoopGroup group, Class<? extends SocketChannel> socketChannelClass, String host,
+            int port, int timeout) {
+        addr = new InetSocketAddress(host, port);
 
-        setDefaultTimeout(60, TimeUnit.SECONDS);
+        bootstrap = new Bootstrap().channel(socketChannelClass).group(group).remoteAddress(addr);
+
+        setDefaultTimeout(timeout, TimeUnit.MILLISECONDS);
 
         channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
-        timer    = new HashedWheelTimer();
-        timer.start();
     }
 
     /**
@@ -143,7 +144,7 @@ public class RedisClient {
         BlockingQueue<Command<K, V, ?>> queue = new LinkedBlockingQueue<Command<K, V, ?>>();
 
         CommandHandler<K, V> handler = new CommandHandler<K, V>(queue);
-        RedisAsyncConnection<K, V> connection = new RedisAsyncConnection<K, V>(queue, codec, timeout, unit);
+        RedisAsyncConnection<K, V> connection = new RedisAsyncConnection<K, V>(this, queue, codec, timeout, unit, bootstrap.group());
 
         return connect(handler, connection);
     }
@@ -160,14 +161,14 @@ public class RedisClient {
         BlockingQueue<Command<K, V, ?>> queue = new LinkedBlockingQueue<Command<K, V, ?>>();
 
         PubSubCommandHandler<K, V> handler = new PubSubCommandHandler<K, V>(queue, codec);
-        RedisPubSubConnection<K, V> connection = new RedisPubSubConnection<K, V>(queue, codec, timeout, unit);
+        RedisPubSubConnection<K, V> connection = new RedisPubSubConnection<K, V>(this, queue, codec, timeout, unit, bootstrap.group());
 
         return connect(handler, connection);
     }
 
     private <K, V, T extends RedisAsyncConnection<K, V>> T connect(final CommandHandler<K, V> handler, final T connection) {
         try {
-            final ConnectionWatchdog watchdog = new ConnectionWatchdog(bootstrap, channels, timer);
+            final ConnectionWatchdog watchdog = new ConnectionWatchdog(bootstrap, channels);
 
             ChannelFuture connect = null;
             // TODO use better concurrent workaround
@@ -181,11 +182,11 @@ public class RedisClient {
             }
             connect.sync();
 
-            watchdog.setReconnect(true);
+            connection.setReconnect(true);
 
             return connection;
         } catch (Throwable e) {
-            throw new RedisException("Unable to connect", e);
+            throw new RedisConnectionException("Unable to connect " + addr, e);
         }
     }
 
@@ -194,15 +195,29 @@ public class RedisClient {
      * discarded after calling shutdown.
      */
     public void shutdown() {
+        ChannelGroupFuture future = shutdownAsync();
+        future.awaitUninterruptibly();
+    }
+
+    public ChannelGroupFuture shutdownAsync() {
+        bootstrap.attr(ConnectionWatchdog.SHUTDOWN_KEY, true);
+
         for (Channel c : channels) {
             ChannelPipeline pipeline = c.pipeline();
             RedisAsyncConnection<?, ?> connection = pipeline.get(RedisAsyncConnection.class);
             connection.close();
         }
-        ChannelGroupFuture future = channels.close();
-        future.awaitUninterruptibly();
-        group.shutdownGracefully().syncUninterruptibly();
-        timer.stop();
+        return channels.close();
     }
+
+    public InetSocketAddress getAddr() {
+        return addr;
+    }
+
+    @Override
+    public String toString() {
+        return "RedisClient [addr=" + addr + "]";
+    }
+
 }
 

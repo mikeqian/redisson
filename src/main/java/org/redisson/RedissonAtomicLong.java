@@ -15,12 +15,20 @@
  */
 package org.redisson;
 
-import java.util.concurrent.atomic.AtomicBoolean;
+import io.netty.util.concurrent.Future;
 
+import org.redisson.async.ResultOperation;
+import org.redisson.async.SyncOperation;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RAtomicLong;
 
+import com.lambdaworks.redis.RedisAsyncConnection;
 import com.lambdaworks.redis.RedisConnection;
+import org.redisson.core.RScript;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 
 /**
  * Distributed alternative to the {@link java.util.concurrent.atomic.AtomicLong}
@@ -30,104 +38,67 @@ import com.lambdaworks.redis.RedisConnection;
  */
 public class RedissonAtomicLong extends RedissonExpirable implements RAtomicLong {
 
-    private final AtomicBoolean initOnce = new AtomicBoolean();
-
-    RedissonAtomicLong(ConnectionManager connectionManager, String name) {
+    protected RedissonAtomicLong(ConnectionManager connectionManager, String name) {
         super(connectionManager, name);
     }
 
-    public void init() {
-        if (!initOnce.compareAndSet(false, true)) {
-            return;
-        }
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            conn.setnx(getName(), 0);
-        } finally {
-            connectionManager.release(conn);
-        }
-    }
-
     @Override
-    public long addAndGet(long delta) {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            return conn.incrby(getName(), delta);
-        } finally {
-            connectionManager.release(conn);
-        }
-    }
-
-    @Override
-    public boolean compareAndSet(long expect, long update) {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            while (true) {
-                conn.watch(getName());
-                Long value = ((Number) conn.get(getName())).longValue();
-                if (value != expect) {
-                    conn.unwatch();
-                    return false;
-                }
-                conn.multi();
-                conn.set(getName(), update);
-                if (conn.exec().size() == 1) {
-                    return true;
-                }
+    public long addAndGet(final long delta) {
+        return connectionManager.write(getName(), new ResultOperation<Long, Object>() {
+            @Override
+            protected Future<Long> execute(RedisAsyncConnection<Object, Object> async) {
+                return async.incrby(getName(), delta);
             }
-        } finally {
-            connectionManager.release(conn);
-        }
+        });
+    }
+
+    @Override
+    public boolean compareAndSet(final long expect, final long update) {
+        return new RedissonScript(connectionManager).evalR(
+                "if redis.call('get', KEYS[1]) == ARGV[1] then redis.call('set', KEYS[1], ARGV[2]); return true else return false end",
+                RScript.ReturnType.BOOLEAN,
+                Collections.<Object>singletonList(getName()), Collections.EMPTY_LIST, Arrays.asList(expect, update));
     }
 
     @Override
     public long decrementAndGet() {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            return conn.decr(getName());
-        } finally {
-            connectionManager.release(conn);
-        }
+        return connectionManager.write(getName(), new ResultOperation<Long, Object>() {
+            @Override
+            protected Future<Long> execute(RedisAsyncConnection<Object, Object> async) {
+                return async.decr(getName());
+            }
+        });
     }
 
     @Override
     public long get() {
-        RedisConnection<String, Object> conn = connectionManager.connectionReadOp();
-        try {
-            return ((Number) conn.get(getName())).longValue();
-        } finally {
-            connectionManager.release(conn);
-        }
+        return addAndGet(0);
     }
 
     @Override
-    public long getAndAdd(long delta) {
-        while (true) {
-            long current = get();
-            long next = current + delta;
-            if (compareAndSet(current, next))
-                return current;
-        }
+    public long getAndAdd(final long delta) {
+        return new RedissonScript(connectionManager).evalR(
+                "local v = redis.call('get', KEYS[1]) or 0; redis.call('set', KEYS[1], v + ARGV[1]); return tonumber(v)",
+                RScript.ReturnType.INTEGER,
+                Collections.<Object>singletonList(getName()), Collections.EMPTY_LIST, Collections.singletonList(delta));
     }
 
     @Override
-    public long getAndSet(long newValue) {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            return ((Number) conn.getset(getName(), newValue)).longValue();
-        } finally {
-            connectionManager.release(conn);
-        }
+    public long getAndSet(final long newValue) {
+        return new RedissonScript(connectionManager).evalR(
+                "local v = redis.call('get', KEYS[1]) or 0; redis.call('set', KEYS[1], ARGV[1]); return tonumber(v)",
+                RScript.ReturnType.INTEGER,
+                Collections.<Object>singletonList(getName()), Collections.EMPTY_LIST, Collections.singletonList(newValue));
     }
 
     @Override
     public long incrementAndGet() {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            return conn.incr(getName());
-        } finally {
-            connectionManager.release(conn);
-        }
+        return connectionManager.write(getName(), new ResultOperation<Long, Object>() {
+            @Override
+            protected Future<Long> execute(RedisAsyncConnection<Object, Object> async) {
+                return async.incr(getName());
+            }
+        });
     }
 
     @Override
@@ -140,13 +111,11 @@ public class RedissonAtomicLong extends RedissonExpirable implements RAtomicLong
     }
 
     @Override
-    public void set(long newValue) {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            conn.set(getName(), newValue);
-        } finally {
-            connectionManager.release(conn);
-        }
+    public void set(final long newValue) {
+        new RedissonScript(connectionManager).evalR(
+                "redis.call('set', KEYS[1], ARGV[1])",
+                RScript.ReturnType.STATUS,
+                Collections.<Object>singletonList(getName()), Collections.EMPTY_LIST, Collections.singletonList(newValue));
     }
 
     public String toString() {

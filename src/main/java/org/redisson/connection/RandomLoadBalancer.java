@@ -18,20 +18,12 @@ package org.redisson.connection;
 import java.util.List;
 import java.util.Random;
 
-import com.lambdaworks.redis.RedisClient;
-
-public class RandomLoadBalancer implements LoadBalancer {
+public class RandomLoadBalancer extends BaseLoadBalancer {
 
     private final Random random = new Random();
 
-    private List<RedisClient> clients;
-
-    public void init(List<RedisClient> clients) {
-        this.clients = clients;
-    }
-
-    public RedisClient nextClient() {
-        return clients.get(random.nextInt(clients.size()));
+    int getIndex(List<SubscribesConnectionEntry> clientsCopy) {
+        return random.nextInt(clientsCopy.size());
     }
 
 }

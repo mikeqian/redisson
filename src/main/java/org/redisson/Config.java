@@ -15,15 +15,8 @@
  */
 package org.redisson;
 
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.List;
-
 import org.redisson.codec.JsonJacksonCodec;
 import org.redisson.codec.RedissonCodec;
-import org.redisson.connection.LoadBalancer;
-import org.redisson.connection.RoundRobinLoadBalancer;
 
 /**
  * Redisson configuration
@@ -33,43 +26,51 @@ import org.redisson.connection.RoundRobinLoadBalancer;
  */
 public class Config {
 
-    /**
-     * Сonnection load balancer to use multiple Redis servers
-     */
-    private LoadBalancer loadBalancer = new RoundRobinLoadBalancer();
+    private SentinelServersConfig sentinelServersConfig;
+
+    private MasterSlaveServersConfig masterSlaveServersConfig;
+
+    private SingleServerConfig singleServerConfig;
+
+    private ClusterServersConfig clusterServersConfig;
 
     /**
-     * Redis key/value codec
+     * Threads amount shared between all redis node clients
      */
-    private RedissonCodec codec = new JsonJacksonCodec();
+    private int threads = 0; // 0 = current_processors_amount * 2
 
     /**
-     * Subscriptions per Redis connection limit
+     * Redis key/value codec. JsonJacksonCodec used by default
      */
-    private int subscriptionsPerConnection = 5;
+    private RedissonCodec codec;
 
-    /**
-     * Redis connection pool size limit
-     */
-    private int connectionPoolSize = 100;
-
-    /**
-     * Password for Redis authentication. Should be null if not needed
-     */
-    private String password;
-
-    private List<URI> addresses = new ArrayList<URI>();
+    private boolean useLinuxNativeEpoll;
 
     public Config() {
     }
 
     Config(Config oldConf) {
+        setUseLinuxNativeEpoll(oldConf.isUseLinuxNativeEpoll());
+
+        if (oldConf.getCodec() == null) {
+            // use it by default
+            oldConf.setCodec(new JsonJacksonCodec());
+        }
+
+        setThreads(oldConf.getThreads());
         setCodec(oldConf.getCodec());
-        setConnectionPoolSize(oldConf.getConnectionPoolSize());
-        setPassword(oldConf.getPassword());
-        setSubscriptionsPerConnection(oldConf.getSubscriptionsPerConnection());
-        setAddresses(oldConf.getAddresses());
-        setLoadBalancer(oldConf.getLoadBalancer());
+        if (oldConf.getSingleServerConfig() != null) {
+            setSingleServerConfig(new SingleServerConfig(oldConf.getSingleServerConfig()));
+        }
+        if (oldConf.getMasterSlaveServersConfig() != null) {
+            setMasterSlaveServersConfig(new MasterSlaveServersConfig(oldConf.getMasterSlaveServersConfig()));
+        }
+        if (oldConf.getSentinelServersConfig() != null ) {
+            setSentinelServersConfig(new SentinelServersConfig(oldConf.getSentinelServersConfig()));
+        }
+        if (oldConf.getClusterServersConfig() != null ) {
+            setClusterServersConfig(new ClusterServersConfig(oldConf.getClusterServersConfig()));
+        }
     }
 
     /**
@@ -78,87 +79,132 @@ public class Config {
      * @see org.redisson.codec.JsonJacksonCodec
      * @see org.redisson.codec.SerializationCodec
      */
-    public void setCodec(RedissonCodec codec) {
+    public Config setCodec(RedissonCodec codec) {
         this.codec = codec;
+        return this;
     }
     public RedissonCodec getCodec() {
         return codec;
     }
 
-    /**
-     * Password for Redis authentication. Should be null if not needed
-     * Default is <code>null</code>
-     *
-     * @param password
-     */
-    public void setPassword(String password) {
-        this.password = password;
-    }
-    public String getPassword() {
-        return password;
+    public ClusterServersConfig useClusterServers() {
+        checkMasterSlaveServersConfig();
+        checkSentinelServersConfig();
+        checkSingleServerConfig();
+
+        if (clusterServersConfig == null) {
+            clusterServersConfig = new ClusterServersConfig();
+        }
+        return clusterServersConfig;
     }
 
-    /**
-     * Subscriptions per Redis connection limit
-     * Default is 5
-     *
-     * @param subscriptionsPerConnection
-     */
-    public void setSubscriptionsPerConnection(int subscriptionsPerConnection) {
-        this.subscriptionsPerConnection = subscriptionsPerConnection;
+    ClusterServersConfig getClusterServersConfig() {
+        return clusterServersConfig;
     }
-    public int getSubscriptionsPerConnection() {
-        return subscriptionsPerConnection;
+    void setClusterServersConfig(ClusterServersConfig clusterServersConfig) {
+        this.clusterServersConfig = clusterServersConfig;
     }
 
-    /**
-     * Redis connection pool size limit
-     * Default is 100
-     *
-     * @param connectionPoolSize
-     */
-    public void setConnectionPoolSize(int connectionPoolSize) {
-        this.connectionPoolSize = connectionPoolSize;
-    }
-    public int getConnectionPoolSize() {
-        return connectionPoolSize;
+    public SingleServerConfig useSingleServer() {
+        checkClusterServersConfig();
+        checkMasterSlaveServersConfig();
+        checkSentinelServersConfig();
+
+        if (singleServerConfig == null) {
+            singleServerConfig = new SingleServerConfig();
+        }
+        return singleServerConfig;
     }
 
-    /**
-     * Redis server address. Use follow format -- host:port
-     *
-     * @param addressesVar
-     */
-    public void addAddress(String ... addressesVar) {
-        for (String address : addressesVar) {
-            try {
-                addresses.add(new URI("//" + address));
-            } catch (URISyntaxException e) {
-                throw new IllegalArgumentException("Can't parse " + address);
-            }
+    SingleServerConfig getSingleServerConfig() {
+        return singleServerConfig;
+    }
+    void setSingleServerConfig(SingleServerConfig singleConnectionConfig) {
+        this.singleServerConfig = singleConnectionConfig;
+    }
+
+    public SentinelServersConfig useSentinelConnection() {
+        checkClusterServersConfig();
+        checkSingleServerConfig();
+        checkMasterSlaveServersConfig();
+
+        if (sentinelServersConfig == null) {
+            sentinelServersConfig = new SentinelServersConfig();
+        }
+        return sentinelServersConfig;
+    }
+
+    SentinelServersConfig getSentinelServersConfig() {
+        return sentinelServersConfig;
+    }
+    void setSentinelServersConfig(SentinelServersConfig sentinelConnectionConfig) {
+        this.sentinelServersConfig = sentinelConnectionConfig;
+    }
+
+    public MasterSlaveServersConfig useMasterSlaveConnection() {
+        checkClusterServersConfig();
+        checkSingleServerConfig();
+        checkSentinelServersConfig();
+
+        if (masterSlaveServersConfig == null) {
+            masterSlaveServersConfig = new MasterSlaveServersConfig();
+        }
+        return masterSlaveServersConfig;
+    }
+    MasterSlaveServersConfig getMasterSlaveServersConfig() {
+        return masterSlaveServersConfig;
+    }
+    void setMasterSlaveServersConfig(MasterSlaveServersConfig masterSlaveConnectionConfig) {
+        this.masterSlaveServersConfig = masterSlaveConnectionConfig;
+    }
+
+    public int getThreads() {
+        return threads;
+    }
+
+    public Config setThreads(int threads) {
+        this.threads = threads;
+        return this;
+    }
+
+    private void checkClusterServersConfig() {
+        if (clusterServersConfig != null) {
+            throw new IllegalStateException("cluster servers config already used!");
         }
     }
-    public List<URI> getAddresses() {
-        return addresses;
+
+    private void checkSentinelServersConfig() {
+        if (sentinelServersConfig != null) {
+            throw new IllegalStateException("sentinel servers config already used!");
+        }
     }
-    void setAddresses(List<URI> addresses) {
-        this.addresses = addresses;
+
+    private void checkMasterSlaveServersConfig() {
+        if (masterSlaveServersConfig != null) {
+            throw new IllegalStateException("master/slave servers already used!");
+        }
+    }
+
+    private void checkSingleServerConfig() {
+        if (singleServerConfig != null) {
+            throw new IllegalStateException("single server config already used!");
+        }
     }
 
     /**
-     * Сonnection load balancer to multiple Redis servers.
-     * Uses Round-robin algorithm by default
+     * Activates an unix socket if servers binded to loopback interface.
+     * Also used for epoll transport activation.
      *
-     * @param loadBalancer
-     *
-     * @see org.redisson.connection.RoundRobinLoadBalancer
-     * @see org.redisson.connection.RandomLoadBalancer
+     * @param useLinuxNativeEpoll
+     * @return
      */
-    public void setLoadBalancer(LoadBalancer loadBalancer) {
-        this.loadBalancer = loadBalancer;
+    public Config setUseLinuxNativeEpoll(boolean useLinuxNativeEpoll) {
+        this.useLinuxNativeEpoll = useLinuxNativeEpoll;
+        return this;
     }
-    public LoadBalancer getLoadBalancer() {
-        return loadBalancer;
+    public boolean isUseLinuxNativeEpoll() {
+        return useLinuxNativeEpoll;
     }
+
 
 }

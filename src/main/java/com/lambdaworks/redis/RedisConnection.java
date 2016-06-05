@@ -2,16 +2,18 @@
 
 package com.lambdaworks.redis;
 
-import com.lambdaworks.redis.protocol.Command;
-import com.lambdaworks.redis.protocol.ConnectionWatchdog;
-
-import java.util.*;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-
-import static com.lambdaworks.redis.protocol.CommandType.MULTI;
 import static java.lang.Math.max;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import io.netty.util.concurrent.Future;
+
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import com.lambdaworks.redis.output.ListScanResult;
+import com.lambdaworks.redis.protocol.ConnectionWatchdog;
 
 /**
  * A synchronous thread-safe connection to a redis server. Multiple threads may
@@ -28,6 +30,10 @@ public class RedisConnection<K, V> {
     protected RedisAsyncConnection<K, V> c;
     protected long timeout;
     protected TimeUnit unit;
+
+    public RedisClient getRedisClient() {
+        return c.getRedisClient();
+    }
 
     /**
      * Initialize a new connection.
@@ -91,9 +97,9 @@ public class RedisConnection<K, V> {
         return await(c.bitopXor(destination, keys));
     }
 
-    public KeyValue<K, V> blpop(long timeout, K... keys) {
+    public KeyValue<K, V> blpop(long timeout, K... keys) throws InterruptedException {
         long timeout2 = (timeout == 0 ? Long.MAX_VALUE : max(timeout, unit.toSeconds(this.timeout)));
-        return await(c.blpop(timeout, keys), timeout2, SECONDS);
+        return awaitInterruptibly(c.blpop(timeout, keys), timeout2, SECONDS);
     }
 
     public KeyValue<K, V> brpop(long timeout, K... keys) {
@@ -101,9 +107,9 @@ public class RedisConnection<K, V> {
         return await(c.brpop(timeout, keys), timeout2, SECONDS);
     }
 
-    public V brpoplpush(long timeout, K source, K destination) {
+    public V brpoplpush(long timeout, K source, K destination) throws InterruptedException {
         long timeout2 = (timeout == 0 ? Long.MAX_VALUE : max(timeout, unit.toSeconds(this.timeout)));
-        return await(c.brpoplpush(timeout, source, destination), timeout2, SECONDS);
+        return awaitInterruptibly(c.brpoplpush(timeout, source, destination), timeout2, SECONDS);
     }
 
     public K clientGetname() {
@@ -210,6 +216,18 @@ public class RedisConnection<K, V> {
         return (T) await(c.evalsha(digest, type, keys, values));
     }
 
+    public Long pfadd(K key, V... values) {
+        return await(c.pfadd(key, values));
+    }
+
+    public Long pfcount(K key, K... keys) {
+        return await(c.pfcount(key, keys));
+    }
+
+    public Long pfmerge(K destkey, K... sourceKeys) {
+        return await(c.pfmerge(destkey, sourceKeys));
+    }
+
     public Boolean exists(K key) {
         return await(c.exists(key));
     }
@@ -270,7 +288,7 @@ public class RedisConnection<K, V> {
         return await(c.hincrby(key, field, amount));
     }
 
-    public Double hincrbyfloat(K key, K field, double amount) {
+    public String hincrbyfloat(K key, K field, String amount) {
         return await(c.hincrbyfloat(key, field, amount));
     }
 
@@ -314,7 +332,7 @@ public class RedisConnection<K, V> {
         return await(c.incrby(key, amount));
     }
 
-    public Double incrbyfloat(K key, double amount) {
+    public String incrbyfloat(K key, String amount) {
         return await(c.incrbyfloat(key, amount));
     }
 
@@ -527,8 +545,16 @@ public class RedisConnection<K, V> {
         return await(c.setex(key, seconds, value));
     }
 
+    public String psetex(K key, long millis, V value) {
+        return await(c.psetex(key, millis, value));
+    }
+
     public Boolean setnx(K key, V value) {
         return await(c.setnx(key, value));
+    }
+
+    public String setexnx(K key, V value, long millis) {
+        return await(c.setexnx(key, value, millis));
     }
 
     public Long setrange(K key, long offset, V value) {
@@ -740,6 +766,10 @@ public class RedisConnection<K, V> {
         return await(c.zremrangebyscore(key, min, max));
     }
 
+    public List<String> time() {
+        return await(c.time());
+    }
+
     public List<V> zrevrange(K key, long start, long stop) {
         return await(c.zrevrange(key, start, stop));
     }
@@ -796,6 +826,18 @@ public class RedisConnection<K, V> {
         return await(c.zunionstore(destination, storeArgs, keys));
     }
 
+    public ListScanResult<V> sscan(K key, long startValue) {
+        return await(c.sscan(key, startValue));
+    }
+
+    public ListScanResult<V> zscan(K key, long startValue) {
+        return await(c.zscan(key, startValue));
+    }
+
+    public RedisAsyncConnection<K, V> getAsync() {
+        return c;
+    }
+
     /**
      * Close the connection.
      */
@@ -814,16 +856,16 @@ public class RedisConnection<K, V> {
         return c.digest(script);
     }
 
-    @SuppressWarnings("unchecked")
     private <T> T await(Future<T> future, long timeout, TimeUnit unit) {
-        Command<K, V, T> cmd = (Command<K, V, T>) future;
-        return c.await(cmd, timeout, unit);
+        return c.await(future, timeout, unit);
+    }
+    
+    private <T> T awaitInterruptibly(Future<T> future, long timeout, TimeUnit unit) throws InterruptedException {
+        return c.awaitInterruptibly(future, timeout, unit);
     }
 
-    @SuppressWarnings("unchecked")
+
     private <T> T await(Future<T> future) {
-        Command<K, V, T> cmd = (Command<K, V, T>) future;
-        if (c.multi != null && cmd.type != MULTI) return null;
-        return c.await(cmd, timeout, unit);
+        return c.await(future, timeout, unit);
     }
 }

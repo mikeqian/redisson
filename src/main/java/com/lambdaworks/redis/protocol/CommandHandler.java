@@ -3,7 +3,10 @@
 package com.lambdaworks.redis.protocol;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufProcessor;
 import io.netty.channel.*;
+import io.netty.util.CharsetUtil;
+import io.netty.util.internal.StringUtil;
 
 import java.util.concurrent.BlockingQueue;
 
@@ -45,6 +48,8 @@ public class CommandHandler<K, V> extends ChannelDuplexHandler {
         try {
             if (!input.isReadable()) return;
 
+//            System.out.println("in: " + toHexString(input));
+
             buffer.discardReadBytes();
             buffer.writeBytes(input);
 
@@ -59,12 +64,37 @@ public class CommandHandler<K, V> extends ChannelDuplexHandler {
         Command<?, ?, ?> cmd = (Command<?, ?, ?>) msg;
         ByteBuf buf = ctx.alloc().heapBuffer();
         cmd.encode(buf);
+//        System.out.println("out: " + toHexString(buf));
+
         ctx.write(buf, promise);
     }
 
+    private String toHexString(ByteBuf buf) {
+        final StringBuilder builder = new StringBuilder(buf.readableBytes() * 2);
+        buf.forEachByte(new ByteBufProcessor() {
+            @Override
+            public boolean process(byte value) throws Exception {
+                char b = (char) value;
+                if ((b < ' ' && b != '\n' && b != '\r') || b > '~') {
+                    builder.append("\\x").append(StringUtil.byteToHexStringPadded(value));
+                } else {
+                    builder.append(b);
+                }
+                return true;
+            }
+        });
+        return builder.toString();
+    }
+
     protected void decode(ChannelHandlerContext ctx, ByteBuf buffer) throws InterruptedException {
-        while(!queue.isEmpty() && rsm.decode(buffer, queue.peek().getOutput())) {
-            Command<K, V, ?> cmd = queue.take();
+        while (true) {
+            Command<K, V, ?> cmd = queue.peek();
+            if (cmd == null
+                    || !rsm.decode(buffer, cmd.getOutput())) {
+                break;
+            }
+
+            cmd = queue.take();
             cmd.complete();
         }
     }

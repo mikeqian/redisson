@@ -15,6 +15,9 @@
  */
 package org.redisson.core;
 
+import io.netty.util.concurrent.Future;
+
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -22,8 +25,14 @@ import java.util.List;
  *
  * @author Nikita Koksharov
  *
- * @param <V> value
+ * @param <V> the type of elements held in this collection
  */
 public interface RList<V> extends List<V>, RExpirable {
 
+    Future<V> getAsync(int index);
+    
+    Future<Boolean> addAsync(V e);
+    
+    Future<Boolean> addAllAsync(Collection<? extends V> c);
+    
 }

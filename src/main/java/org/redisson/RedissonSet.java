@@ -15,14 +15,19 @@
  */
 package org.redisson;
 
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.NoSuchElementException;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 
+import java.util.*;
+
+import org.redisson.async.AsyncOperation;
+import org.redisson.async.OperationListener;
+import org.redisson.async.ResultOperation;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RSet;
 
-import com.lambdaworks.redis.RedisConnection;
+import com.lambdaworks.redis.RedisAsyncConnection;
+import com.lambdaworks.redis.output.ListScanResult;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.Set}
@@ -33,18 +38,18 @@ import com.lambdaworks.redis.RedisConnection;
  */
 public class RedissonSet<V> extends RedissonExpirable implements RSet<V> {
 
-    RedissonSet(ConnectionManager connectionManager, String name) {
+    protected RedissonSet(ConnectionManager connectionManager, String name) {
         super(connectionManager, name);
     }
 
     @Override
     public int size() {
-        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
-        try {
-            return connection.scard(getName()).intValue();
-        } finally {
-            connectionManager.release(connection);
-        }
+        return connectionManager.read(getName(), new ResultOperation<Long, V>() {
+            @Override
+            public Future<Long> execute(RedisAsyncConnection<Object, V> async) {
+                return async.scard(getName());
+            }
+        }).intValue();
     }
 
     @Override
@@ -53,98 +58,135 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V> {
     }
 
     @Override
-    public boolean contains(Object o) {
-        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
-        try {
-            return connection.sismember(getName(), o);
-        } finally {
-            connectionManager.release(connection);
-        }
+    public boolean contains(final Object o) {
+        return connectionManager.read(getName(), new ResultOperation<Boolean, Object>() {
+            @Override
+            public Future<Boolean> execute(RedisAsyncConnection<Object, Object> async) {
+                return async.sismember(getName(), o);
+            }
+        });
+    }
+
+    private ListScanResult<V> scanIterator(final long startPos) {
+        return connectionManager.read(getName(), new ResultOperation<ListScanResult<V>, V>() {
+            @Override
+            public Future<ListScanResult<V>> execute(RedisAsyncConnection<Object, V> async) {
+                return async.sscan(getName(), startPos);
+            }
+        });
     }
 
     @Override
     public Iterator<V> iterator() {
-        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
-        try {
-            // TODO use SSCAN in case of usage Redis 2.8
-            final Iterator<V> iter = (Iterator<V>) connection.smembers(getName()).iterator();
-            return new Iterator<V>() {
+        return new Iterator<V>() {
 
-                private boolean removeExecuted;
-                private V value;
+            private Iterator<V> iter;
+            private Long iterPos;
 
-                @Override
-                public boolean hasNext() {
-                    return iter.hasNext();
+            private boolean removeExecuted;
+            private V value;
+
+            @Override
+            public boolean hasNext() {
+                if (iter == null) {
+                    ListScanResult<V> res = scanIterator(0);
+                    iter = res.getValues().iterator();
+                    iterPos = res.getPos();
+                } else if (!iter.hasNext() && iterPos != 0) {
+                    ListScanResult<V> res = scanIterator(iterPos);
+                    iter = res.getValues().iterator();
+                    iterPos = res.getPos();
+                }
+                return iter.hasNext();
+            }
+
+            @Override
+            public V next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException("No such element at index");
                 }
 
-                @Override
-                public V next() {
-                    if (!hasNext()) {
-                        throw new NoSuchElementException("No such element at index");
-                    }
+                value = iter.next();
+                removeExecuted = false;
+                return value;
+            }
 
-                    value = iter.next();
-                    removeExecuted = false;
-                    return value;
+            @Override
+            public void remove() {
+                if (removeExecuted) {
+                    throw new IllegalStateException("Element been already deleted");
                 }
 
-                @Override
-                public void remove() {
-                    if (removeExecuted) {
-                        throw new IllegalStateException("Element been already deleted");
-                    }
+                // lazy init iterator
+//                hasNext();
+                iter.remove();
+                RedissonSet.this.remove(value);
+                removeExecuted = true;
+            }
 
-                    iter.remove();
-                    RedissonSet.this.remove(value);
-                    removeExecuted = true;
-                }
-
-            };
-        } finally {
-            connectionManager.release(connection);
-        }
-
+        };
     }
 
     @Override
     public Object[] toArray() {
-        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
-        try {
-            return connection.smembers(getName()).toArray();
-        } finally {
-            connectionManager.release(connection);
-        }
+        Set<V> res = connectionManager.read(getName(), new ResultOperation<Set<V>, V>() {
+            @Override
+            public Future<Set<V>> execute(RedisAsyncConnection<Object, V> async) {
+                return async.smembers(getName());
+            }
+        });
+        return res.toArray();
     }
 
     @Override
     public <T> T[] toArray(T[] a) {
-        RedisConnection<Object, Object> connection = connectionManager.connectionReadOp();
-        try {
-            return connection.smembers(getName()).toArray(a);
-        } finally {
-            connectionManager.release(connection);
-        }
+        Set<V> res = connectionManager.read(getName(), new ResultOperation<Set<V>, V>() {
+            @Override
+            public Future<Set<V>> execute(RedisAsyncConnection<Object, V> async) {
+                return async.smembers(getName());
+            }
+        });
+        return res.toArray(a);
     }
 
     @Override
-    public boolean add(V e) {
-        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            return connection.sadd(getName(), e) > 0;
-        } finally {
-            connectionManager.release(connection);
-        }
+    public boolean add(final V e) {
+        return connectionManager.get(addAsync(e));
     }
 
     @Override
-    public boolean remove(Object o) {
-        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            return connection.srem(getName(), o) > 0;
-        } finally {
-            connectionManager.release(connection);
-        }
+    public Future<Boolean> addAsync(final V e) {
+        return connectionManager.writeAsync(getName(), new AsyncOperation<V, Boolean>() {
+            @Override
+            public void execute(final Promise<Boolean> promise, RedisAsyncConnection<Object, V> async) {
+                async.sadd(getName(), e).addListener(new OperationListener<V, Boolean, Long>(promise, async, this) {
+                    @Override
+                    public void onOperationComplete(Future<Long> future) throws Exception {
+                        promise.setSuccess(future.get() > 0);
+                    }
+                });
+            }
+        });
+    }
+
+    @Override
+    public Future<Boolean> removeAsync(final V e) {
+        return connectionManager.writeAsync(getName(), new AsyncOperation<V, Boolean>() {
+            @Override
+            public void execute(final Promise<Boolean> promise, RedisAsyncConnection<Object, V> async) {
+                async.srem(getName(), e).addListener(new OperationListener<V, Boolean, Long>(promise, async, this) {
+                    @Override
+                    public void onOperationComplete(Future<Long> future) throws Exception {
+                        promise.setSuccess(future.get() > 0);
+                    }
+                });
+            }
+        });
+    }
+
+    @Override
+    public boolean remove(Object value) {
+        return connectionManager.get(removeAsync((V)value));
     }
 
     @Override
@@ -158,45 +200,49 @@ public class RedissonSet<V> extends RedissonExpirable implements RSet<V> {
     }
 
     @Override
-    public boolean addAll(Collection<? extends V> c) {
-        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            return connection.sadd(getName(), c.toArray()) > 0;
-        } finally {
-            connectionManager.release(connection);
+    public boolean addAll(final Collection<? extends V> c) {
+        if (c.isEmpty()) {
+            return false;
         }
+
+        Long res = connectionManager.write(getName(), new ResultOperation<Long, Object>() {
+            @Override
+            public Future<Long> execute(RedisAsyncConnection<Object, Object> async) {
+                return async.sadd(getName(), c.toArray());
+            }
+        });
+        return res > 0;
     }
 
     @Override
     public boolean retainAll(Collection<?> c) {
-        boolean changed = false;
-        for (Object object : this) {
+        List<V> toRemove = new ArrayList<V>();
+        for (V object : this) {
             if (!c.contains(object)) {
-                remove(object);
-                changed = true;
+                toRemove.add(object);
             }
         }
-        return changed;
+        return removeAll(toRemove);
     }
 
     @Override
-    public boolean removeAll(Collection<?> c) {
-        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            return connection.srem(getName(), c.toArray()) > 0;
-        } finally {
-            connectionManager.release(connection);
+    public boolean removeAll(final Collection<?> c) {
+        if (c.isEmpty()) {
+            return false;
         }
+        
+        Long res = connectionManager.write(getName(), new ResultOperation<Long, Object>() {
+            @Override
+            public Future<Long> execute(RedisAsyncConnection<Object, Object> async) {
+                return async.srem(getName(), c.toArray());
+            }
+        });
+        return res > 0;
     }
 
     @Override
     public void clear() {
-        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            connection.del(getName());
-        } finally {
-            connectionManager.release(connection);
-        }
+        delete();
     }
 
 }

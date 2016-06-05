@@ -30,18 +30,19 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.EventLoopGroup;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.lambdaworks.codec.Base16;
 import com.lambdaworks.redis.codec.RedisCodec;
@@ -54,8 +55,13 @@ import com.lambdaworks.redis.output.IntegerOutput;
 import com.lambdaworks.redis.output.KeyListOutput;
 import com.lambdaworks.redis.output.KeyOutput;
 import com.lambdaworks.redis.output.KeyValueOutput;
+import com.lambdaworks.redis.output.ListMapOutput;
+import com.lambdaworks.redis.output.ListScanOutput;
+import com.lambdaworks.redis.output.ListScanResult;
 import com.lambdaworks.redis.output.MapKeyListOutput;
 import com.lambdaworks.redis.output.MapOutput;
+import com.lambdaworks.redis.output.MapScanOutput;
+import com.lambdaworks.redis.output.MapScanResult;
 import com.lambdaworks.redis.output.MapValueListOutput;
 import com.lambdaworks.redis.output.MapValueOutput;
 import com.lambdaworks.redis.output.MultiOutput;
@@ -66,8 +72,10 @@ import com.lambdaworks.redis.output.StringListOutput;
 import com.lambdaworks.redis.output.ValueListOutput;
 import com.lambdaworks.redis.output.ValueOutput;
 import com.lambdaworks.redis.output.ValueSetOutput;
+import com.lambdaworks.redis.output.ValueSetScanOutput;
 import com.lambdaworks.redis.protocol.Command;
 import com.lambdaworks.redis.protocol.CommandArgs;
+import com.lambdaworks.redis.protocol.CommandKeyword;
 import com.lambdaworks.redis.protocol.CommandOutput;
 import com.lambdaworks.redis.protocol.CommandType;
 import com.lambdaworks.redis.protocol.ConnectionWatchdog;
@@ -85,6 +93,9 @@ import com.lambdaworks.redis.protocol.ConnectionWatchdog;
  */
 @ChannelHandler.Sharable
 public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
+
+    private Logger log = LoggerFactory.getLogger(getClass());
+
     protected BlockingQueue<Command<K, V, ?>> queue;
     protected RedisCodec<K, V> codec;
     protected Channel channel;
@@ -94,6 +105,18 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
     private String password;
     private int db;
     private boolean closed;
+    private EventLoopGroup eventLoopGroup;
+    private RedisClient redisClient;
+
+    private volatile boolean reconnect;
+
+    public void setReconnect(boolean reconnect) {
+        this.reconnect = reconnect;
+    }
+
+    public boolean isReconnect() {
+        return reconnect;
+    }
 
     /**
      * Initialize a new connection.
@@ -102,12 +125,15 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
      * @param codec   Codec used to encode/decode keys and values.
      * @param timeout Maximum time to wait for a response.
      * @param unit    Unit of time for the timeout.
+     * @param eventLoopGroup
      */
-    public RedisAsyncConnection(BlockingQueue<Command<K, V, ?>> queue, RedisCodec<K, V> codec, long timeout, TimeUnit unit) {
+    public RedisAsyncConnection(RedisClient redisClient, BlockingQueue<Command<K, V, ?>> queue, RedisCodec<K, V> codec, long timeout, TimeUnit unit, EventLoopGroup eventLoopGroup) {
         this.queue = queue;
         this.codec = codec;
         this.timeout = timeout;
         this.unit = unit;
+        this.eventLoopGroup = eventLoopGroup;
+        this.redisClient = redisClient;
     }
 
     /**
@@ -127,7 +153,7 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
 
     public String auth(String password) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(password);
-        Command<K, V, String> cmd = dispatch(AUTH, new StatusOutput<K, V>(codec), args);
+        Future<String> cmd = dispatch(AUTH, new StatusOutput<K, V>(codec), args);
         String status = await(cmd, timeout, unit);
         if ("OK".equals(status)) this.password = password;
         return status;
@@ -270,14 +296,53 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
 
     public <T> Future<T> eval(V script, ScriptOutputType type, K[] keys, V... values) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec);
-        args.addValue(script).add(keys.length).addKeys(keys).addValues(values);
+        args.add(script.toString()).add(keys.length).addKeys(keys).addMapValues(values);
         CommandOutput<K, V, T> output = newScriptOutput(codec, type);
         return dispatch(EVAL, output, args);
     }
 
+    public <T> Future<T> eval(V script, ScriptOutputType type, List<K> keys, V... values) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec);
+        args.add(script.toString()).add(keys.size()).addKeys(keys).addMapValues(values);
+        CommandOutput<K, V, T> output = newScriptOutput(codec, type);
+        return dispatch(EVAL, output, args);
+    }
+
+    public <T> Future<T> evalR(V script, ScriptOutputType type, List<K> keys, List<?> values, List<?> rawValues) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec);
+        args.add(script.toString()).add(keys.size()).addKeys(keys);
+        for (Object value : values) {
+            args.addMapValue((V) value);
+        }
+        for (Object value : rawValues) {
+            if (value instanceof String) {
+                args.add((String) value);
+            } else if (value instanceof Integer) {
+                args.add((Integer) value);
+            } else if (value instanceof Long) {
+                args.add((Long) value);
+            } else if (value instanceof Double) {
+                args.add((Double) value);
+            } else if (value instanceof byte[]) {
+                args.add((byte[]) value);
+            } else {
+                throw new IllegalArgumentException("Unsupported raw value type: " + value.getClass());
+            }
+        }
+        CommandOutput<K, V, T> output = newScriptOutput(codec, type);
+        return dispatch(EVAL, output, args);
+    }
+
+    public <T> Future<T> evalsha(String digest, ScriptOutputType type, List<K> keys, V... values) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec);
+        args.add(digest).add(keys.size()).addKeys(keys).addMapValues(values);
+        CommandOutput<K, V, T> output = newScriptOutput(codec, type);
+        return dispatch(EVALSHA, output, args);
+    }
+
     public <T> Future<T> evalsha(String digest, ScriptOutputType type, K[] keys, V... values) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec);
-        args.add(digest).add(keys.length).addKeys(keys).addValues(values);
+        args.add(digest).add(keys.length).addKeys(keys).addMapValues(values);
         CommandOutput<K, V, T> output = newScriptOutput(codec, type);
         return dispatch(EVALSHA, output, args);
     }
@@ -349,13 +414,13 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
     }
 
     public Future<Long> hincrby(K key, K field, long amount) {
-        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addKey(field).add(amount);
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addMapKey(field).add(amount);
         return dispatch(HINCRBY, new IntegerOutput<K, V>(codec), args);
     }
 
-    public Future<Double> hincrbyfloat(K key, K field, double amount) {
-        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addKey(field).add(amount);
-        return dispatch(HINCRBYFLOAT, new DoubleOutput<K, V>(codec), args);
+    public Future<String> hincrbyfloat(K key, K field, String amount) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addMapKey(field).add(amount);
+        return dispatch(HINCRBYFLOAT, new StatusOutput<K, V>(codec), args);
     }
 
     public Future<Map<K, V>> hgetall(K key) {
@@ -371,7 +436,7 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
     }
 
     public Future<List<V>> hmget(K key, K... fields) {
-        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addKeys(fields);
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addMapKeys(fields);
         return dispatch(HMGET, new ValueListOutput<K, V>(codec), args);
     }
 
@@ -403,9 +468,9 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
         return dispatch(INCRBY, new IntegerOutput<K, V>(codec), args);
     }
 
-    public Future<Double> incrbyfloat(K key, double amount) {
+    public Future<String> incrbyfloat(K key, String amount) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).add(amount);
-        return dispatch(INCRBYFLOAT, new DoubleOutput<K, V>(codec), args);
+        return dispatch(INCRBYFLOAT, new StatusOutput<K, V>(codec), args);
     }
 
     public Future<String> info() {
@@ -488,8 +553,12 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
         return dispatch(MOVE, new BooleanOutput<K, V>(codec), args);
     }
 
+    public boolean isMultiMode() {
+        return multi != null;
+    }
+
     public Future<String> multi() {
-        Command<K, V, String> cmd = dispatch(MULTI, new StatusOutput<K, V>(codec));
+        Future<String> cmd = dispatch(MULTI, new StatusOutput<K, V>(codec));
         multi = (multi == null ? new MultiOutput<K, V>(codec) : multi);
         return cmd;
     }
@@ -547,7 +616,7 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
     }
 
     public Future<Long> publish(K channel, V message) {
-        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(channel).addValue(message);
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(channel.toString()).addValue(message);
         return dispatch(PUBLISH, new IntegerOutput<K, V>(codec), args);
     }
 
@@ -622,7 +691,7 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
     }
 
     public Future<String> scriptLoad(V script) {
-        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(LOAD).addValue(script);
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(LOAD).add(script.toString());
         return dispatch(SCRIPT, new StatusOutput<K, V>(codec), args);
     }
 
@@ -638,7 +707,7 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
 
     public String select(int db) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(db);
-        Command<K, V, String> cmd = dispatch(SELECT, new StatusOutput<K, V>(codec), args);
+        Future<String> cmd = dispatch(SELECT, new StatusOutput<K, V>(codec), args);
         String status = await(cmd, timeout, unit);
         if ("OK".equals(status)) this.db = db;
         return status;
@@ -658,8 +727,18 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
         return dispatch(SETEX, new StatusOutput<K, V>(codec), args);
     }
 
+    public Future<String> psetex(K key, long millis, V value) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).add(millis).addValue(value);
+        return dispatch(PSETEX, new StatusOutput<K, V>(codec), args);
+    }
+
     public Future<Boolean> setnx(K key, V value) {
         return dispatch(SETNX, new BooleanOutput<K, V>(codec), key, value);
+    }
+
+    public Future<String> setexnx(K key, V value, long millis) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addValue(value).add("px").add(millis).add("nx");
+        return dispatch(SET, new StatusOutput<K, V>(codec), args);
     }
 
     public Future<Long> setrange(K key, long offset, V value) {
@@ -930,6 +1009,10 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
         return zrevrangebyscore(key, string(max), string(min));
     }
 
+    public Future<List<String>> time() {
+        return dispatch(TIME, new StringListOutput<K, V>(codec));
+    }
+
     public Future<List<V>> zrevrangebyscore(K key, String max, String min) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).add(max).add(min);
         return dispatch(ZREVRANGEBYSCORE, new ValueListOutput<K, V>(codec), args);
@@ -984,6 +1067,51 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
         return dispatch(ZUNIONSTORE, new IntegerOutput<K, V>(codec), args);
     }
 
+    public Future<Long> pfadd(K key, V... values) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addValues(values);
+        return dispatch(PFADD, new IntegerOutput<K, V>(codec), args);
+    }
+
+    public Future<Long> pfcount(K key, K... keys) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addKeys(keys);
+        return dispatch(PFCOUNT, new IntegerOutput<K, V>(codec), args);
+    }
+
+    public Future<Long> pfmerge(K destkey, K... sourceKeys) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKeys(destkey).addKeys(sourceKeys);
+        return dispatch(PFADD, new IntegerOutput<K, V>(codec), args);
+    }
+
+    public Future<List<V>> getMasterAddrByKey(K name) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add("get-master-addr-by-name").addKey(name);
+        return dispatch(SENTINEL, new ValueListOutput<K, V>(codec), args);
+    }
+
+    public Future<List<Map<K, V>>> slaves(K key) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add("slaves").addKey(key);
+        return dispatch(SENTINEL, new ListMapOutput<K, V>(codec), args);
+    }
+
+    public Future<ListScanResult<V>> sscan(K key, long startValue) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).add(startValue);
+        return dispatch(SSCAN, new ValueSetScanOutput<K, V>(codec), args);
+    }
+
+    public Future<MapScanResult<K, V>> hscan(K key, long startValue) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).add(startValue);
+        return dispatch(HSCAN, new MapScanOutput<K, V>(codec), args);
+    }
+
+    public Future<ListScanResult<V>> zscan(K key, long startValue) {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).add(startValue);
+        return dispatch(ZSCAN, new ListScanOutput<K, V>(codec), args);
+    }
+
+    public Future<String> clusterNodes() {
+        CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(CommandKeyword.NODES);
+        return dispatch(CLUSTER, new StatusOutput<K, V>(codec), args);
+    }
+
     /**
      * Wait until commands are complete or the connection timeout is reached.
      *
@@ -1033,9 +1161,8 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
      * Close the connection.
      */
     public synchronized void close() {
+        setReconnect(false);
         if (!closed && channel != null) {
-            ConnectionWatchdog watchdog = channel.pipeline().get(ConnectionWatchdog.class);
-            watchdog.setReconnect(false);
             closed = true;
             channel.close();
         }
@@ -1059,19 +1186,19 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
 
         if (password != null) {
             CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(password);
-            tmp.add(new Command<K, V, String>(AUTH, new StatusOutput<K, V>(codec), args, false));
+            tmp.add(new Command<K, V, String>(AUTH, new StatusOutput<K, V>(codec), args, false, ctx.executor().<String>newPromise()));
         }
 
         if (db != 0) {
             CommandArgs<K, V> args = new CommandArgs<K, V>(codec).add(db);
-            tmp.add(new Command<K, V, String>(SELECT, new StatusOutput<K, V>(codec), args, false));
+            tmp.add(new Command<K, V, String>(SELECT, new StatusOutput<K, V>(codec), args, false, ctx.executor().<String>newPromise()));
         }
 
         tmp.addAll(queue);
         queue.clear();
 
         for (Command<K, V, ?> cmd : tmp) {
-            if (!cmd.isCancelled()) {
+            if (!cmd.getPromise().isCancelled()) {
                 queue.add(cmd);
                 channel.writeAndFlush(cmd);
             }
@@ -1095,27 +1222,32 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
         }
     }
 
-    public <T> Command<K, V, T> dispatch(CommandType type, CommandOutput<K, V, T> output) {
+    public <T> Future<T> dispatch(CommandType type, CommandOutput<K, V, T> output) {
         return dispatch(type, output, (CommandArgs<K, V>) null);
     }
 
-    public <T> Command<K, V, T> dispatch(CommandType type, CommandOutput<K, V, T> output, K key) {
+    public <T> Future<T> dispatch(CommandType type, CommandOutput<K, V, T> output, K key) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key);
         return dispatch(type, output, args);
     }
 
-    public <T> Command<K, V, T> dispatch(CommandType type, CommandOutput<K, V, T> output, K key, V value) {
+    public <T> Future<T> dispatch(CommandType type, CommandOutput<K, V, T> output, K key, V value) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addValue(value);
         return dispatch(type, output, args);
     }
 
-    public <T> Command<K, V, T> dispatch(CommandType type, CommandOutput<K, V, T> output, K key, V[] values) {
+    public <T> Future<T> dispatch(CommandType type, CommandOutput<K, V, T> output, K key, V[] values) {
         CommandArgs<K, V> args = new CommandArgs<K, V>(codec).addKey(key).addValues(values);
         return dispatch(type, output, args);
     }
 
-    public synchronized <T> Command<K, V, T> dispatch(CommandType type, CommandOutput<K, V, T> output, CommandArgs<K, V> args) {
-        Command<K, V, T> cmd = new Command<K, V, T>(type, output, args, multi != null);
+    public synchronized <T> Promise<T> dispatch(CommandType type, CommandOutput<K, V, T> output, CommandArgs<K, V> args) {
+        if (queue == null) {
+            throw new RedisConnectionClosedException("Connection is closed");
+        }
+
+        Promise<T> promise = eventLoopGroup.next().<T>newPromise();
+        Command<K, V, T> cmd = new Command<K, V, T>(type, output, args, multi != null, promise);
 
         try {
             if (multi != null) {
@@ -1127,23 +1259,46 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
             if (channel != null) {
                 channel.writeAndFlush(cmd);
             }
-        } catch (NullPointerException e) {
-            throw new RedisException("Connection is closed");
         } catch (InterruptedException e) {
             throw new RedisCommandInterruptedException(e);
         }
 
-        return cmd;
+        if (multi != null && type != MULTI) {
+            Promise<T> p = eventLoopGroup.next().<T>newPromise();
+            p.setSuccess(null);
+            return p;
+        }
+        return promise;
     }
 
-    public <T> T await(Command<K, V, T> cmd, long timeout, TimeUnit unit) {
-        if (!cmd.await(timeout, unit)) {
-            cmd.cancel(true);
-            throw new RedisException("Command timed out");
+    public <T> T await(Future<T> cmd, long timeout, TimeUnit unit) {
+        if (!cmd.awaitUninterruptibly(timeout, unit)) {
+            Promise<T> promise = (Promise<T>)cmd;
+            RedisTimeoutException ex = new RedisTimeoutException();
+            promise.setFailure(ex);
+            throw ex;
         }
-        CommandOutput<K, V, T> output = cmd.getOutput();
-        if (output.hasError()) throw new RedisException(output.getError());
-        return output.get();
+        if (!cmd.isSuccess()) {
+            throw (RedisException) cmd.cause();
+        }
+        return cmd.getNow();
+    }
+
+    public <T> T awaitInterruptibly(Future<T> cmd, long timeout, TimeUnit unit) throws InterruptedException {
+        if (!cmd.await(timeout, unit)) {
+            Promise<T> promise = (Promise<T>)cmd;
+            RedisTimeoutException ex = new RedisTimeoutException();
+            promise.setFailure(ex);
+            throw ex;
+        }
+        if (!cmd.isSuccess()) {
+            throw (RedisException) cmd.cause();
+        }
+        return cmd.getNow();
+    }
+
+    public RedisClient getRedisClient() {
+        return redisClient;
     }
 
     @SuppressWarnings("unchecked")
@@ -1154,6 +1309,8 @@ public class RedisAsyncConnection<K, V> extends ChannelInboundHandlerAdapter {
             case STATUS:  return (CommandOutput<K, V, T>) new StatusOutput<K, V>(codec);
             case MULTI:   return (CommandOutput<K, V, T>) new NestedMultiOutput<K, V>(codec);
             case VALUE:   return (CommandOutput<K, V, T>) new ValueOutput<K, V>(codec);
+            case MAPVALUE:   return (CommandOutput<K, V, T>) new MapValueOutput<K, V>(codec);
+            case MAPVALUELIST:   return (CommandOutput<K, V, T>) new MapValueListOutput<K, V>(codec);
             default:      throw new RedisException("Unsupported script output type");
         }
     }

@@ -15,23 +15,26 @@
  */
 package org.redisson;
 
+import io.netty.util.concurrent.Future;
+
 import java.util.NoSuchElementException;
 
+import org.redisson.async.ResultOperation;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.core.RQueue;
 
-import com.lambdaworks.redis.RedisConnection;
+import com.lambdaworks.redis.RedisAsyncConnection;
 
 /**
- * Distributed and concurrent implementation of {@link java.util.List}
+ * Distributed and concurrent implementation of {@link java.util.Queue}
  *
  * @author Nikita Koksharov
  *
- * @param <V> value
+ * @param <V> the type of elements held in this collection
  */
 public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
 
-    RedissonQueue(ConnectionManager connectionManager, String name) {
+    protected RedissonQueue(ConnectionManager connectionManager, String name) {
         super(connectionManager, name);
     }
 
@@ -41,29 +44,24 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
     }
 
     public V getFirst() {
-        RedisConnection<String, Object> connection = connectionManager.connectionReadOp();
-        try {
-            V value = (V) connection.lindex(getName(), 0);
-            if (value == null) {
-                throw new NoSuchElementException();
+        V value = connectionManager.read(getName(), new ResultOperation<V, V>() {
+            @Override
+            protected Future<V> execute(RedisAsyncConnection<Object, V> async) {
+                return async.lindex(getName(), 0);
             }
-            return value;
-        } finally {
-            connectionManager.release(connection);
+        });
+        if (value == null) {
+            throw new NoSuchElementException();
         }
+        return value;
     }
 
     public V removeFirst() {
-        RedisConnection<String, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            V value = (V) connection.lpop(getName());
-            if (value == null) {
-                throw new NoSuchElementException();
-            }
-            return value;
-        } finally {
-            connectionManager.release(connection);
+        V value = poll();
+        if (value == null) {
+            throw new NoSuchElementException();
         }
+        return value;
     }
 
     @Override
@@ -73,12 +71,12 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
 
     @Override
     public V poll() {
-        RedisConnection<String, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            return (V) connection.lpop(getName());
-        } finally {
-            connectionManager.release(connection);
-        }
+        return connectionManager.write(getName(), new ResultOperation<V, V>() {
+            @Override
+            protected Future<V> execute(RedisAsyncConnection<Object, V> async) {
+                return async.lpop(getName());
+            }
+        });
     }
 
     @Override
@@ -92,6 +90,21 @@ public class RedissonQueue<V> extends RedissonList<V> implements RQueue<V> {
             return null;
         }
         return get(0);
+    }
+
+    @Override
+    public V pollLastAndOfferFirstTo(final String queueName) {
+        return connectionManager.write(new ResultOperation<V, V>() {
+            @Override
+            protected Future<V> execute(RedisAsyncConnection<Object, V> async) {
+                return async.rpoplpush(getName(), queueName);
+            }
+        });
+    }
+
+    @Override
+    public V pollLastAndOfferFirstTo(RQueue<V> queue) {
+        return pollLastAndOfferFirstTo(queue.getName());
     }
 
 }

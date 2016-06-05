@@ -15,25 +15,16 @@
  */
 package org.redisson;
 
+import com.lambdaworks.redis.RedisAsyncConnection;
+import io.netty.util.concurrent.Future;
+import org.redisson.async.ResultOperation;
+import org.redisson.connection.*;
+import org.redisson.core.*;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentMap;
-
-import org.redisson.connection.ConnectionManager;
-import org.redisson.core.RAtomicLong;
-import org.redisson.core.RCountDownLatch;
-import org.redisson.core.RDeque;
-import org.redisson.core.RList;
-import org.redisson.core.RLock;
-import org.redisson.core.RMap;
-import org.redisson.core.RQueue;
-import org.redisson.core.RSet;
-import org.redisson.core.RSortedSet;
-import org.redisson.core.RTopic;
-import org.redisson.misc.ReferenceMap;
-import org.redisson.misc.ReferenceMap.ReferenceType;
-import org.redisson.misc.ReferenceMap.RemoveValueListener;
-
-import com.lambdaworks.redis.RedisConnection;
 
 /**
  * Main infrastructure class allows to get access
@@ -42,30 +33,7 @@ import com.lambdaworks.redis.RedisConnection;
  * @author Nikita Koksharov
  *
  */
-public class Redisson {
-
-    private final RemoveValueListener listener = new RemoveValueListener() {
-
-        @Override
-        public void onRemove(Object value) {
-            if (value instanceof RedissonObject) {
-                ((RedissonObject)value).close();
-            }
-        }
-
-    };
-
-    private final ConcurrentMap<String, RedissonCountDownLatch> latchesMap = new ReferenceMap<String, RedissonCountDownLatch>(ReferenceType.STRONG, ReferenceType.SOFT, listener);
-    private final ConcurrentMap<String, RedissonTopic> topicsMap = new ReferenceMap<String, RedissonTopic>(ReferenceType.STRONG, ReferenceType.SOFT, listener);
-    private final ConcurrentMap<String, RedissonLock> locksMap = new ReferenceMap<String, RedissonLock>(ReferenceType.STRONG, ReferenceType.SOFT, listener);
-
-    private final ConcurrentMap<String, RedissonAtomicLong> atomicLongsMap = new ReferenceMap<String, RedissonAtomicLong>(ReferenceType.STRONG, ReferenceType.SOFT);
-    private final ConcurrentMap<String, RedissonQueue> queuesMap = new ReferenceMap<String, RedissonQueue>(ReferenceType.STRONG, ReferenceType.SOFT);
-    private final ConcurrentMap<String, RedissonDeque> dequeMap = new ReferenceMap<String, RedissonDeque>(ReferenceType.STRONG, ReferenceType.SOFT);
-    private final ConcurrentMap<String, RedissonSet> setsMap = new ReferenceMap<String, RedissonSet>(ReferenceType.STRONG, ReferenceType.SOFT);
-    private final ConcurrentMap<String, RedissonSortedSet> sortedSetMap = new ReferenceMap<String, RedissonSortedSet>(ReferenceType.STRONG, ReferenceType.SOFT);
-    private final ConcurrentMap<String, RedissonList> listsMap = new ReferenceMap<String, RedissonList>(ReferenceType.STRONG, ReferenceType.SOFT);
-    private final ConcurrentMap<String, RedissonMap> mapsMap = new ReferenceMap<String, RedissonMap>(ReferenceType.STRONG, ReferenceType.SOFT);
+public class Redisson implements RedissonClient {
 
     private final ConnectionManager connectionManager;
     private final Config config;
@@ -75,7 +43,17 @@ public class Redisson {
     Redisson(Config config) {
         this.config = config;
         Config configCopy = new Config(config);
-        connectionManager = new ConnectionManager(configCopy);
+        if (configCopy.getMasterSlaveServersConfig() != null) {
+            connectionManager = new MasterSlaveConnectionManager(configCopy.getMasterSlaveServersConfig(), configCopy);
+        } else if (configCopy.getSingleServerConfig() != null) {
+            connectionManager = new SingleConnectionManager(configCopy.getSingleServerConfig(), configCopy);
+        } else if (configCopy.getSentinelServersConfig() != null) {
+            connectionManager = new SentinelConnectionManager(configCopy.getSentinelServersConfig(), configCopy);
+        } else if (configCopy.getClusterServersConfig() != null) {
+            connectionManager = new ClusterConnectionManager(configCopy.getClusterServersConfig(), configCopy);
+        } else {
+            throw new IllegalArgumentException("server(s) address(es) not defined!");
+        }
     }
 
     /**
@@ -85,7 +63,10 @@ public class Redisson {
      */
     public static Redisson create() {
         Config config = new Config();
-        config.addAddress("127.0.0.1:6379");
+        config.useSingleServer().setAddress("127.0.0.1:6379");
+//        config.useMasterSlaveConnection().setMasterAddress("127.0.0.1:6379").addSlaveAddress("127.0.0.1:6389").addSlaveAddress("127.0.0.1:6399");
+//        config.useSentinelConnection().setMasterName("mymaster").addSentinelAddress("127.0.0.1:26389", "127.0.0.1:26379");
+//        config.useClusterServers().addNodeAddress("127.0.0.1:7000");
         return create(config);
     }
 
@@ -100,22 +81,60 @@ public class Redisson {
     }
 
     /**
+     * Returns object holder by name
+     *
+     * @param name of object
+     * @return
+     */
+    @Override
+    public <V> RBucket<V> getBucket(String name) {
+        return new RedissonBucket<V>(connectionManager, name);
+    }
+
+    /**
+     * Returns a list of object holder by a key pattern
+     */
+    @Override
+    public <V> List<RBucket<V>> getBuckets(final String pattern) {
+        List<Object> keys = connectionManager.get(connectionManager.readAsync(new ResultOperation<List<Object>, V>() {
+            @Override
+            public Future<List<Object>> execute(RedisAsyncConnection<Object, V> async) {
+                return async.keys(pattern);
+            }
+        }));
+        if (keys == null) {
+            return Collections.emptyList();
+        }
+        List<RBucket<V>> buckets = new ArrayList<RBucket<V>>(keys.size());
+        for (Object key : keys) {
+            if(key != null) {
+                buckets.add(this.<V>getBucket(key.toString()));
+            }
+        }
+        return buckets;
+    }
+
+
+    /**
+     * Returns HyperLogLog object
+     *
+     * @param name of object
+     * @return
+     */
+    @Override
+    public <V> RHyperLogLog<V> getHyperLogLog(String name) {
+        return new RedissonHyperLogLog<V>(connectionManager, name);
+    }
+
+    /**
      * Returns distributed list instance by name.
      *
      * @param name of the distributed list
      * @return distributed list
      */
+    @Override
     public <V> RList<V> getList(String name) {
-        RedissonList<V> list = listsMap.get(name);
-        if (list == null) {
-            list = new RedissonList<V>(connectionManager, name);
-            RedissonList<V> oldList = listsMap.putIfAbsent(name, list);
-            if (oldList != null) {
-                list = oldList;
-            }
-        }
-
-        return list;
+        return new RedissonList<V>(connectionManager, name);
     }
 
     /**
@@ -124,17 +143,9 @@ public class Redisson {
      * @param name of the distributed map
      * @return distributed map
      */
+    @Override
     public <K, V> RMap<K, V> getMap(String name) {
-        RedissonMap<K, V> map = mapsMap.get(name);
-        if (map == null) {
-            map = new RedissonMap<K, V>(connectionManager, name);
-            RedissonMap<K, V> oldMap = mapsMap.putIfAbsent(name, map);
-            if (oldMap != null) {
-                map = oldMap;
-            }
-        }
-
-        return map;
+        return new RedissonMap<K, V>(connectionManager, name);
     }
 
     /**
@@ -143,18 +154,9 @@ public class Redisson {
      * @param name of the distributed lock
      * @return distributed lock
      */
+    @Override
     public RLock getLock(String name) {
-        RedissonLock lock = locksMap.get(name);
-        if (lock == null) {
-            lock = new RedissonLock(connectionManager, name, id);
-            RedissonLock oldLock = locksMap.putIfAbsent(name, lock);
-            if (oldLock != null) {
-                lock = oldLock;
-            }
-        }
-
-        lock.subscribe();
-        return lock;
+        return new RedissonLock(connectionManager, name, id);
     }
 
     /**
@@ -163,17 +165,18 @@ public class Redisson {
      * @param name of the distributed set
      * @return distributed set
      */
+    @Override
     public <V> RSet<V> getSet(String name) {
-        RedissonSet<V> set = setsMap.get(name);
-        if (set == null) {
-            set = new RedissonSet<V>(connectionManager, name);
-            RedissonSet<V> oldSet = setsMap.putIfAbsent(name, set);
-            if (oldSet != null) {
-                set = oldSet;
-            }
-        }
+        return new RedissonSet<V>(connectionManager, name);
+    }
 
-        return set;
+    /**
+     * Returns script with eval-operations support
+     *
+     * @return
+     */
+    public RScript getScript() {
+        return new RedissonScript(connectionManager);
     }
 
     /**
@@ -182,38 +185,36 @@ public class Redisson {
      * @param name of the distributed set
      * @return distributed set
      */
+    @Override
     public <V> RSortedSet<V> getSortedSet(String name) {
-        RedissonSortedSet<V> set = sortedSetMap.get(name);
-        if (set == null) {
-            set = new RedissonSortedSet<V>(connectionManager, name);
-            RedissonSortedSet<V> oldSet = sortedSetMap.putIfAbsent(name, set);
-            if (oldSet != null) {
-                set = oldSet;
-            }
-        }
-
-        return set;
+        return new RedissonSortedSet<V>(connectionManager, name);
     }
 
     /**
-     * Returns distributed topic instance by name.
+     * Returns topic instance by name.
      *
      * @param name of the distributed topic
      * @return distributed topic
      */
+    @Override
     public <M> RTopic<M> getTopic(String name) {
-        RedissonTopic<M> topic = topicsMap.get(name);
-        if (topic == null) {
-            topic = new RedissonTopic<M>(connectionManager, name);
-            RedissonTopic<M> oldTopic = topicsMap.putIfAbsent(name, topic);
-            if (oldTopic != null) {
-                topic = oldTopic;
-            }
-        }
+        return new RedissonTopic<M>(connectionManager, name);
+    }
 
-        topic.subscribe();
-        return topic;
-
+    /**
+     * Returns topic instance satisfies by pattern name.
+     *
+     *  Supported glob-style patterns:
+     *    h?llo subscribes to hello, hallo and hxllo
+     *    h*llo subscribes to hllo and heeeello
+     *    h[ae]llo subscribes to hello and hallo, but not hillo
+     *
+     * @param pattern of the topic
+     * @return
+     */
+    @Override
+    public <M> RTopic<M> getTopicPattern(String pattern) {
+        return new RedissonTopicPattern<M>(connectionManager, pattern);
     }
 
     /**
@@ -222,17 +223,20 @@ public class Redisson {
      * @param name of the distributed queue
      * @return distributed queue
      */
+    @Override
     public <V> RQueue<V> getQueue(String name) {
-        RedissonQueue<V> queue = queuesMap.get(name);
-        if (queue == null) {
-            queue = new RedissonQueue<V>(connectionManager, name);
-            RedissonQueue<V> oldQueue = queuesMap.putIfAbsent(name, queue);
-            if (oldQueue != null) {
-                queue = oldQueue;
-            }
-        }
+        return new RedissonQueue<V>(connectionManager, name);
+    }
 
-        return queue;
+    /**
+     * Returns distributed blocking queue instance by name.
+     *
+     * @param name of the distributed blocking queue
+     * @return distributed queue
+     */
+    @Override
+    public <V> RBlockingQueue<V> getBlockingQueue(String name) {
+        return new RedissonBlockingQueue(connectionManager, name);
     }
 
     /**
@@ -241,17 +245,9 @@ public class Redisson {
      * @param name of the distributed queue
      * @return distributed queue
      */
+    @Override
     public <V> RDeque<V> getDeque(String name) {
-        RedissonDeque<V> queue = dequeMap.get(name);
-        if (queue == null) {
-            queue = new RedissonDeque<V>(connectionManager, name);
-            RedissonDeque<V> oldQueue = dequeMap.putIfAbsent(name, queue);
-            if (oldQueue != null) {
-                queue = oldQueue;
-            }
-        }
-
-        return queue;
+        return new RedissonDeque<V>(connectionManager, name);
     }
 
     /**
@@ -260,19 +256,9 @@ public class Redisson {
      * @param name of the distributed "atomic long"
      * @return distributed "atomic long"
      */
+    @Override
     public RAtomicLong getAtomicLong(String name) {
-        RedissonAtomicLong atomicLong = atomicLongsMap.get(name);
-        if (atomicLong == null) {
-            atomicLong = new RedissonAtomicLong(connectionManager, name);
-            RedissonAtomicLong oldAtomicLong = atomicLongsMap.putIfAbsent(name, atomicLong);
-            if (oldAtomicLong != null) {
-                atomicLong = oldAtomicLong;
-            }
-        }
-
-        atomicLong.init();
-        return atomicLong;
-
+        return new RedissonAtomicLong(connectionManager, name);
     }
 
     /**
@@ -281,18 +267,9 @@ public class Redisson {
      * @param name of the distributed "count down latch"
      * @return distributed "count down latch"
      */
+    @Override
     public RCountDownLatch getCountDownLatch(String name) {
-        RedissonCountDownLatch latch = latchesMap.get(name);
-        if (latch == null) {
-            latch = new RedissonCountDownLatch(connectionManager, name);
-            RedissonCountDownLatch oldLatch = latchesMap.putIfAbsent(name, latch);
-            if (oldLatch != null) {
-                latch = oldLatch;
-            }
-        }
-
-        latch.subscribe();
-        return latch;
+        return new RedissonCountDownLatch(connectionManager, name, id);
     }
 
     /**
@@ -314,12 +291,12 @@ public class Redisson {
     }
 
     public void flushdb() {
-        RedisConnection<Object, Object> connection = connectionManager.connectionWriteOp();
-        try {
-            connection.flushdb();
-        } finally {
-            connectionManager.release(connection);
-        }
+        connectionManager.writeAllAsync(new ResultOperation<String, Object>() {
+            @Override
+            protected Future<String> execute(RedisAsyncConnection<Object, Object> conn) {
+                return conn.flushdb();
+            }
+        }).awaitUninterruptibly();
     }
 
 }

@@ -15,18 +15,15 @@
  */
 package org.redisson;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicBoolean;
+import io.netty.util.concurrent.Future;
 
+import org.redisson.async.ResultOperation;
 import org.redisson.connection.ConnectionManager;
 import org.redisson.connection.PubSubConnectionEntry;
 import org.redisson.core.MessageListener;
 import org.redisson.core.RTopic;
 
-import com.lambdaworks.redis.RedisConnection;
-import com.lambdaworks.redis.pubsub.RedisPubSubAdapter;
+import com.lambdaworks.redis.RedisAsyncConnection;
 
 /**
  * Distributed topic implementation. Messages are delivered to all message listeners across Redis cluster.
@@ -37,70 +34,71 @@ import com.lambdaworks.redis.pubsub.RedisPubSubAdapter;
  */
 public class RedissonTopic<M> extends RedissonObject implements RTopic<M> {
 
-    private final CountDownLatch subscribeLatch = new CountDownLatch(1);
-    private final AtomicBoolean subscribeOnce = new AtomicBoolean();
-
-    private final Map<Integer, RedisPubSubTopicListenerWrapper<String, M>> listeners =
-                                new ConcurrentHashMap<Integer, RedisPubSubTopicListenerWrapper<String, M>>();
-    private final ConnectionManager connectionManager;
-
-    private PubSubConnectionEntry pubSubEntry;
-
-    RedissonTopic(ConnectionManager connectionManager, String name) {
-        super(name);
-        this.connectionManager = connectionManager;
-    }
-
-    public void subscribe() {
-        if (subscribeOnce.compareAndSet(false, true)) {
-            RedisPubSubAdapter<String, M> listener = new RedisPubSubAdapter<String, M>() {
-
-                @Override
-                public void subscribed(String channel, long count) {
-                    if (channel.equals(getName())) {
-                        subscribeLatch.countDown();
-                    }
-                }
-
-            };
-
-            pubSubEntry = connectionManager.subscribe(listener, getName());
-        }
-
-        try {
-            subscribeLatch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+    protected RedissonTopic(ConnectionManager connectionManager, String name) {
+        super(connectionManager, name);
     }
 
     @Override
-    public void publish(M message) {
-        RedisConnection<String, Object> conn = connectionManager.connectionWriteOp();
-        try {
-            conn.publish(getName(), message);
-        } finally {
-            connectionManager.release(conn);
-        }
+    public long publish(M message) {
+        return connectionManager.get(publishAsync(message));
+    }
+
+    @Override
+    public Future<Long> publishAsync(final M message) {
+        return connectionManager.writeAsync(getName(), new ResultOperation<Long, M>() {
+            @Override
+            protected Future<Long> execute(RedisAsyncConnection<Object, M> async) {
+                return async.publish(getName(), message);
+            }
+        });
     }
 
     @Override
     public int addListener(MessageListener<M> listener) {
-        RedisPubSubTopicListenerWrapper<String, M> pubSubListener = new RedisPubSubTopicListenerWrapper<String, M>(listener, getName());
-        listeners.put(pubSubListener.hashCode(), pubSubListener);
-        pubSubEntry.addListener(pubSubListener);
-        return pubSubListener.hashCode();
+        RedisPubSubTopicListenerWrapper<M> pubSubListener = new RedisPubSubTopicListenerWrapper<M>(listener, getName());
+        return addListener(pubSubListener);
+    }
+
+    private int addListener(RedisPubSubTopicListenerWrapper<M> pubSubListener) {
+        PubSubConnectionEntry entry = connectionManager.subscribe(getName());
+        synchronized (entry) {
+            if (entry.isActive()) {
+                entry.addListener(getName(), pubSubListener);
+                return pubSubListener.hashCode();
+            }
+        }
+        // entry is inactive trying add again
+        return addListener(pubSubListener);
     }
 
     @Override
     public void removeListener(int listenerId) {
-        RedisPubSubTopicListenerWrapper<String, M> pubSubListener = listeners.remove(listenerId);
-        pubSubEntry.removeListener(pubSubListener);
+        PubSubConnectionEntry entry = connectionManager.getEntry(getName());
+        if (entry == null) {
+            return;
+        }
+        synchronized (entry) {
+            if (entry.isActive()) {
+                entry.removeListener(getName(), listenerId);
+                if (!entry.hasListeners(getName())) {
+                    connectionManager.unsubscribe(getName());
+                }
+                return;
+            }
+        }
+
+        // entry is inactive trying add again
+        removeListener(listenerId);
     }
 
     @Override
-    public void close() {
-        connectionManager.unsubscribe(pubSubEntry, getName());
+    public boolean delete() {
+        throw new UnsupportedOperationException();
     }
+
+    @Override
+    public io.netty.util.concurrent.Future<Boolean> deleteAsync() {
+        throw new UnsupportedOperationException();
+    };
 
 }

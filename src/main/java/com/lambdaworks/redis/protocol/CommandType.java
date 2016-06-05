@@ -26,7 +26,7 @@ public enum CommandType {
     // String
 
     APPEND, GET, GETRANGE, GETSET, MGET, MSET, MSETNX, SET, SETEX, SETNX,
-    SETRANGE, STRLEN,
+    SETRANGE, STRLEN, PSETEX,
 
     // Numeric
 
@@ -62,13 +62,24 @@ public enum CommandType {
     ZRANK, ZREM, ZREMRANGEBYRANK, ZREMRANGEBYSCORE, ZREVRANGE,
     ZREVRANGEBYSCORE, ZREVRANK, ZSCORE, ZUNIONSTORE,
 
+    TIME,
+
     // Scripting
 
     EVAL, EVALSHA, SCRIPT,
 
     // Bits
 
-    BITCOUNT, BITOP, GETBIT, SETBIT;
+    BITCOUNT, BITOP, GETBIT, SETBIT,
+
+    // HyperLogLog
+    PFADD, PFCOUNT, PFMERGE,
+
+    SENTINEL,
+
+    SSCAN, ZSCAN, HSCAN,
+
+    ASKING, CLUSTER;
 
     public byte[] bytes;
 
